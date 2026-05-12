@@ -14,10 +14,12 @@ export { AgentLoop, type AgentRunContext, type AgentRunResult } from "./agent-lo
 export {
   OpenAICompatAdapter,
   OllamaAdapter,
+  OpenRouterAdapter,
   BackendError,
   type BackendAdapter,
   type OpenAICompatAdapterOptions,
   type OllamaAdapterOptions,
+  type OpenRouterAdapterOptions,
 } from "./backend/index.js";
 
 // Stores

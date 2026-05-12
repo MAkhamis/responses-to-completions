@@ -1,14 +1,16 @@
 import type {
   ChatCompletionChunk,
   ChatCompletionUsage,
+  ReasoningDetail,
 } from "../types/completions.js";
 import type {
   FunctionCallItem,
   OutputItem,
   OutputMessageItem,
+  ReasoningItem,
   ResponseObject,
 } from "../types/responses.js";
-import { genFcId, genMessageId } from "../util/ids.js";
+import { genFcId, genMessageId, genReasoningId } from "../util/ids.js";
 import { translateUsage } from "./response.js";
 
 /**
@@ -16,8 +18,16 @@ import { translateUsage } from "./response.js";
  * HTTP layer can serialize them as SSE with `event: <type>\ndata: <json>`.
  */
 export type StreamEvent =
-  | { type: "response.created"; sequence_number: number; response: ResponseObject }
-  | { type: "response.in_progress"; sequence_number: number; response: ResponseObject }
+  | {
+      type: "response.created";
+      sequence_number: number;
+      response: ResponseObject;
+    }
+  | {
+      type: "response.in_progress";
+      sequence_number: number;
+      response: ResponseObject;
+    }
   | {
       type: "response.output_item.added";
       sequence_number: number;
@@ -71,13 +81,35 @@ export type StreamEvent =
       arguments: string;
     }
   | {
+      type: "response.reasoning_summary_text.delta";
+      sequence_number: number;
+      item_id: string;
+      output_index: number;
+      delta: string;
+    }
+  | {
+      type: "response.reasoning_summary_text.done";
+      sequence_number: number;
+      item_id: string;
+      output_index: number;
+      text: string;
+    }
+  | {
       type: "response.output_item.done";
       sequence_number: number;
       output_index: number;
       item: OutputItem;
     }
-  | { type: "response.completed"; sequence_number: number; response: ResponseObject }
-  | { type: "response.failed"; sequence_number: number; response: ResponseObject }
+  | {
+      type: "response.completed";
+      sequence_number: number;
+      response: ResponseObject;
+    }
+  | {
+      type: "response.failed";
+      sequence_number: number;
+      response: ResponseObject;
+    }
   | {
       type: "response.error";
       sequence_number: number;
@@ -106,8 +138,16 @@ export async function* translateChunkStream(
   chunks: AsyncIterable<ChatCompletionChunk>,
   initialResponse: ResponseObject,
   startSeq = 0,
-): AsyncGenerator<StreamEvent, { items: OutputItem[]; usage: ReturnType<typeof translateUsage> }> {
+): AsyncGenerator<
+  StreamEvent,
+  { items: OutputItem[]; usage: ReturnType<typeof translateUsage> }
+> {
   let seq = startSeq;
+
+  let reasoningItem: ReasoningItem | null = null;
+  let reasoningOutputIndex = -1;
+  let reasoningText = "";
+  const encryptedBlobs: ReasoningDetail[] = [];
 
   // Message-output tracking
   let messageItem: OutputMessageItem | null = null;
@@ -134,6 +174,45 @@ export async function* translateChunkStream(
     const choice = chunk.choices?.[0];
     if (!choice) continue;
     const delta = choice.delta ?? {};
+
+    const newEncrypted =
+      delta.reasoning_details?.filter(
+        (d) => d.type === "reasoning.encrypted",
+      ) ?? [];
+    if (newEncrypted.length > 0) encryptedBlobs.push(...newEncrypted);
+    const reasoningFromDetails =
+      delta.reasoning_details
+        ?.filter((d) => d.type !== "reasoning.encrypted")
+        .map((d) => d.text || d.summary || "")
+        .join("") || null;
+
+    const reasoningDelta =
+      delta.reasoning_content || delta.reasoning || reasoningFromDetails;
+    if (typeof reasoningDelta === "string" && reasoningDelta.length > 0) {
+      if (!reasoningItem) {
+        reasoningItem = {
+          type: "reasoning",
+          id: genReasoningId(),
+          status: "in_progress",
+          content: [],
+        };
+        reasoningOutputIndex = nextOutputIndex++;
+        yield {
+          type: "response.output_item.added",
+          sequence_number: nextSeq(),
+          output_index: reasoningOutputIndex,
+          item: reasoningItem,
+        };
+      }
+      reasoningText += reasoningDelta;
+      yield {
+        type: "response.reasoning_summary_text.delta",
+        sequence_number: nextSeq(),
+        item_id: reasoningItem.id,
+        output_index: reasoningOutputIndex,
+        delta: reasoningDelta,
+      };
+    }
 
     // --- text content ---
     if (typeof delta.content === "string" && delta.content.length > 0) {
@@ -200,7 +279,8 @@ export async function* translateChunkStream(
         }
         // Later chunks may carry id/name after the first.
         if (tc.id && !state.item.call_id) state.item.call_id = tc.id;
-        if (tc.function?.name && !state.item.name) state.item.name = tc.function.name;
+        if (tc.function?.name && !state.item.name)
+          state.item.name = tc.function.name;
 
         const argDelta = tc.function?.arguments;
         if (typeof argDelta === "string" && argDelta.length > 0) {
@@ -218,6 +298,29 @@ export async function* translateChunkStream(
 
     // --- finish ---
     if (choice.finish_reason) {
+      if (reasoningItem) {
+        reasoningItem.status = "completed";
+        reasoningItem.content = [
+          { type: "reasoning_text", text: reasoningText },
+        ];
+        if (encryptedBlobs.length > 0) {
+          reasoningItem.encrypted_content = JSON.stringify(encryptedBlobs);
+          encryptedBlobs.length = 0;
+        }
+        yield {
+          type: "response.reasoning_summary_text.done",
+          sequence_number: nextSeq(),
+          item_id: reasoningItem.id,
+          output_index: reasoningOutputIndex,
+          text: reasoningText,
+        };
+        yield {
+          type: "response.output_item.done",
+          sequence_number: nextSeq(),
+          output_index: reasoningOutputIndex,
+          item: reasoningItem,
+        };
+      }
       if (messageItem) {
         if (contentOpen) {
           yield {
@@ -248,7 +351,9 @@ export async function* translateChunkStream(
           item: messageItem,
         };
       }
-      for (const state of [...tools.values()].sort((a, b) => a.outputIndex - b.outputIndex)) {
+      for (const state of [...tools.values()].sort(
+        (a, b) => a.outputIndex - b.outputIndex,
+      )) {
         if (state.doneEmitted) continue;
         state.item.arguments = state.argsBuf;
         state.item.status = "completed";
@@ -272,9 +377,24 @@ export async function* translateChunkStream(
 
   // Assemble final items in output-index order.
   const allItems: OutputItem[] = [];
+  if (reasoningItem) allItems[reasoningOutputIndex] = reasoningItem;
   if (messageItem) allItems[messageOutputIndex] = messageItem;
   for (const state of tools.values()) allItems[state.outputIndex] = state.item;
-  const items = allItems.filter((x): x is OutputItem => !!x);
+  const ordered = allItems.filter((x): x is OutputItem => !!x);
+
+  const items: OutputItem[] =
+    encryptedBlobs.length > 0
+      ? [
+          {
+            type: "reasoning",
+            id: genReasoningId(),
+            status: "completed",
+            content: [],
+            encrypted_content: JSON.stringify(encryptedBlobs),
+          } satisfies ReasoningItem,
+          ...ordered,
+        ]
+      : ordered;
 
   return { items, usage: translateUsage(usage) };
 }

@@ -5,6 +5,7 @@ import type {
   ChatFunctionTool,
   ChatMessage,
   ChatToolCall,
+  ReasoningDetail,
 } from "./types/completions.js";
 import type {
   CreateResponseRequest,
@@ -19,13 +20,20 @@ import type {
   ToolDef,
   Usage,
 } from "./types/responses.js";
-import { McpConnection, needsApproval, type McpToolInfo } from "./mcp/client.js";
+import {
+  McpConnection,
+  needsApproval,
+  type McpToolInfo,
+} from "./mcp/client.js";
 import {
   itemsToMessages,
   translateResponseFormat,
   translateToolChoice,
 } from "./translate/request.js";
-import { completionToOutputItems, translateUsage } from "./translate/response.js";
+import {
+  completionToOutputItems,
+  translateUsage,
+} from "./translate/response.js";
 import { translateChunkStream, type StreamEvent } from "./translate/stream.js";
 import {
   genMcpApprovalId,
@@ -64,15 +72,24 @@ export class AgentLoop {
     const maxIter = this.deps.maxIterations ?? 10;
 
     try {
-      let messages = itemsToMessages(ctx.history, ctx.request.input, ctx.request.instructions);
+      let messages = itemsToMessages(
+        ctx.history,
+        ctx.request.input,
+        ctx.request.instructions,
+      );
       let chatTools = [...clientFunctionTools, ...mcpSetup.chatTools];
 
       for (let iter = 0; iter < maxIter; iter++) {
-        const req: ChatCompletionRequest = buildChatRequest(ctx.request, messages, chatTools);
+        const req: ChatCompletionRequest = buildChatRequest(
+          ctx.request,
+          messages,
+          chatTools,
+        );
         const resp = await this.deps.backend.complete(req, ctx.signal);
         usage = mergeUsage(usage, translateUsage(resp.usage));
 
-        const { items: newItems, outputText: _ } = completionToOutputItems(resp);
+        const { items: newItems, outputText: _ } =
+          completionToOutputItems(resp);
         producedItems.push(...newItems);
 
         const pendingFcs = newItems.filter(
@@ -81,7 +98,10 @@ export class AgentLoop {
         if (pendingFcs.length === 0) return { items: producedItems, usage };
 
         // Split tool calls into MCP (server-executed) vs client function tools.
-        const { mcpCalls, clientCalls } = classifyCalls(pendingFcs, mcpSetup.toolToServer);
+        const { mcpCalls, clientCalls } = classifyCalls(
+          pendingFcs,
+          mcpSetup.toolToServer,
+        );
         if (clientCalls.length > 0) {
           // Client must execute these; stop and return them as function_call items.
           // (Mixed batches: we still surface the MCP items we already executed.)
@@ -109,14 +129,17 @@ export class AgentLoop {
           toolMessages.push({
             role: "tool",
             tool_call_id: fc.call_id,
-            content: mcpOutcome.item.output ?? (mcpOutcome.item.error ?? ""),
+            content: mcpOutcome.item.output ?? mcpOutcome.item.error ?? "",
           });
         }
 
         // Feed results back and loop.
         messages = [
           ...messages,
-          assistantToolCallMessage(pendingFcs),
+          assistantToolCallMessage(
+            pendingFcs,
+            extractEncryptedReasoning(newItems),
+          ),
           ...toolMessages,
         ];
       }
@@ -132,7 +155,9 @@ export class AgentLoop {
    * agent steps are serialized: stream iteration N's deltas fully, execute
    * any MCP tool calls, emit their mcp_call items, then stream iteration N+1.
    */
-  async *stream(ctx: AgentRunContext): AsyncGenerator<StreamEvent, AgentRunResult> {
+  async *stream(
+    ctx: AgentRunContext,
+  ): AsyncGenerator<StreamEvent, AgentRunResult> {
     const mcpSetup = await this.setupMcp(ctx.request.tools);
     const clientFunctionTools = collectClientFunctionTools(ctx.request.tools);
     const producedItems: OutputItem[] = [];
@@ -158,21 +183,39 @@ export class AgentLoop {
     }
 
     try {
-      let messages = itemsToMessages(ctx.history, ctx.request.input, ctx.request.instructions);
+      let messages = itemsToMessages(
+        ctx.history,
+        ctx.request.input,
+        ctx.request.instructions,
+      );
       let chatTools = [...clientFunctionTools, ...mcpSetup.chatTools];
 
       for (let iter = 0; iter < maxIter; iter++) {
-        const req: ChatCompletionRequest = buildChatRequest(ctx.request, messages, chatTools);
+        const req: ChatCompletionRequest = buildChatRequest(
+          ctx.request,
+          messages,
+          chatTools,
+        );
         const chunks = this.deps.backend.stream(req, ctx.signal);
         const snapshot = snapshotResponseFor(ctx, producedItems);
-        const gen = translateChunkStream(reindexChunks(chunks, producedItems.length), snapshot, seq);
+        const gen = translateChunkStream(
+          reindexChunks(chunks, producedItems.length),
+          snapshot,
+          seq,
+        );
 
         // Pipe through the translator, collecting items + usage when it finishes.
-        let stepResult: { items: OutputItem[]; usage: Usage | null } = { items: [], usage: null };
+        let stepResult: { items: OutputItem[]; usage: Usage | null } = {
+          items: [],
+          usage: null,
+        };
         while (true) {
           const r = await gen.next();
           if (r.done) {
-            stepResult = r.value as { items: OutputItem[]; usage: Usage | null };
+            stepResult = r.value as {
+              items: OutputItem[];
+              usage: Usage | null;
+            };
             break;
           }
           seq = r.value.sequence_number + 1;
@@ -187,7 +230,10 @@ export class AgentLoop {
         );
         if (pendingFcs.length === 0) return { items: producedItems, usage };
 
-        const { mcpCalls, clientCalls } = classifyCalls(pendingFcs, mcpSetup.toolToServer);
+        const { mcpCalls, clientCalls } = classifyCalls(
+          pendingFcs,
+          mcpSetup.toolToServer,
+        );
         if (clientCalls.length > 0) return { items: producedItems, usage };
 
         const toolMessages: ChatMessage[] = [];
@@ -214,13 +260,16 @@ export class AgentLoop {
           toolMessages.push({
             role: "tool",
             tool_call_id: fc.call_id,
-            content: outcome.item.output ?? (outcome.item.error ?? ""),
+            content: outcome.item.output ?? outcome.item.error ?? "",
           });
         }
 
         messages = [
           ...messages,
-          assistantToolCallMessage(pendingFcs),
+          assistantToolCallMessage(
+            pendingFcs,
+            extractEncryptedReasoning(stepResult.items),
+          ),
           ...toolMessages,
         ];
       }
@@ -233,9 +282,7 @@ export class AgentLoop {
 
   // --- helpers ---
 
-  private async setupMcp(
-    tools: ToolDef[] | undefined,
-  ): Promise<{
+  private async setupMcp(tools: ToolDef[] | undefined): Promise<{
     listItems: McpListToolsItem[];
     chatTools: ChatFunctionTool[];
     toolToServer: Map<string, ResolvedMcpServer>;
@@ -322,7 +369,9 @@ export class AgentLoop {
 
     let parsedArgs: Record<string, unknown> = {};
     try {
-      parsedArgs = fc.arguments ? (JSON.parse(fc.arguments) as Record<string, unknown>) : {};
+      parsedArgs = fc.arguments
+        ? (JSON.parse(fc.arguments) as Record<string, unknown>)
+        : {};
     } catch {
       parsedArgs = {};
     }
@@ -384,7 +433,9 @@ function collectClientFunctionTools(
   tools: ToolDef[] | undefined,
 ): ChatFunctionTool[] {
   return (tools ?? [])
-    .filter((t): t is Extract<ToolDef, { type: "function" }> => t.type === "function")
+    .filter(
+      (t): t is Extract<ToolDef, { type: "function" }> => t.type === "function",
+    )
     .map((t) => ({
       type: "function",
       function: {
@@ -408,18 +459,21 @@ function buildChatRequest(
     ...(r.tool_choice !== undefined
       ? { tool_choice: translateToolChoice(r.tool_choice) }
       : {}),
-    ...(r.parallel_tool_calls !== undefined
+    ...(tools.length && r.parallel_tool_calls !== undefined
       ? { parallel_tool_calls: r.parallel_tool_calls }
       : {}),
     ...(r.temperature !== undefined ? { temperature: r.temperature } : {}),
     ...(r.top_p !== undefined ? { top_p: r.top_p } : {}),
-    ...(r.max_output_tokens !== undefined ? { max_tokens: r.max_output_tokens } : {}),
+    ...(r.max_output_tokens !== undefined
+      ? { max_tokens: r.max_output_tokens }
+      : {}),
     ...(r.user !== undefined ? { user: r.user } : {}),
     ...(r.metadata ? { metadata: r.metadata } : {}),
     ...(() => {
       const rf = translateResponseFormat(r.text);
       return rf ? { response_format: rf } : {};
     })(),
+    ...(r.reasoning ? { reasoning: r.reasoning } : {}),
   };
 }
 
@@ -436,18 +490,43 @@ function classifyCalls(
   return { mcpCalls, clientCalls };
 }
 
-function assistantToolCallMessage(fcs: FunctionCallItem[]): ChatMessage {
+function assistantToolCallMessage(
+  fcs: FunctionCallItem[],
+  reasoning?: ReasoningDetail[] | null,
+): ChatMessage {
   const tool_calls: ChatToolCall[] = fcs.map((fc) => ({
     id: fc.call_id,
     type: "function",
     function: { name: fc.name, arguments: fc.arguments ?? "" },
   }));
-  return { role: "assistant", content: null, tool_calls };
+  const msg: ChatMessage = { role: "assistant", content: null, tool_calls };
+  if (reasoning?.length)
+    (msg as { reasoning_details?: ReasoningDetail[] }).reasoning_details =
+      reasoning;
+  return msg;
+}
+
+function extractEncryptedReasoning(
+  items: OutputItem[],
+): ReasoningDetail[] | null {
+  for (const item of items) {
+    if (item.type === "reasoning") {
+      const r = item as import("./types/responses.js").ReasoningItem;
+      if (r.encrypted_content) {
+        try {
+          return JSON.parse(r.encrypted_content) as ReasoningDetail[];
+        } catch {}
+      }
+    }
+  }
+  return null;
 }
 
 function removeFunctionCall(items: OutputItem[], callId: string): void {
   const idx = items.findIndex(
-    (it) => it.type === "function_call" && (it as FunctionCallItem).call_id === callId,
+    (it) =>
+      it.type === "function_call" &&
+      (it as FunctionCallItem).call_id === callId,
   );
   if (idx >= 0) items.splice(idx, 1);
 }
@@ -462,7 +541,10 @@ function mergeUsage(a: Usage | null, b: Usage | null): Usage | null {
   };
 }
 
-function snapshotResponseFor(ctx: AgentRunContext, produced: OutputItem[]): ResponseObject {
+function snapshotResponseFor(
+  ctx: AgentRunContext,
+  produced: OutputItem[],
+): ResponseObject {
   const r = ctx.request;
   return {
     id: "pending",
@@ -477,9 +559,10 @@ function snapshotResponseFor(ctx: AgentRunContext, produced: OutputItem[]): Resp
     output: produced,
     parallel_tool_calls: r.parallel_tool_calls ?? true,
     previous_response_id: r.previous_response_id ?? null,
-    conversation: typeof r.conversation === "string"
-      ? { id: r.conversation }
-      : (r.conversation ?? null),
+    conversation:
+      typeof r.conversation === "string"
+        ? { id: r.conversation }
+        : (r.conversation ?? null),
     temperature: r.temperature ?? null,
     tool_choice: r.tool_choice ?? "auto",
     tools: r.tools ?? [],
@@ -499,6 +582,9 @@ function snapshotResponseFor(ctx: AgentRunContext, produced: OutputItem[]): Resp
  * and then the caller re-indexes produced items when concatenating. For the
  * event sequence_number we use a single monotonic counter in the outer loop.
  */
-async function* reindexChunks<T>(src: AsyncIterable<T>, _baseIndex: number): AsyncIterable<T> {
+async function* reindexChunks<T>(
+  src: AsyncIterable<T>,
+  _baseIndex: number,
+): AsyncIterable<T> {
   for await (const x of src) yield x;
 }

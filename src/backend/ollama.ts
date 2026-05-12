@@ -52,14 +52,16 @@ export class OllamaAdapter implements BackendAdapter {
       if (m.role === "tool") {
         return {
           role: "tool",
-          content: typeof m.content === "string" ? m.content : partsToText(m.content),
+          content:
+            typeof m.content === "string" ? m.content : partsToText(m.content),
           tool_call_id: m.tool_call_id,
         };
       }
       const asst = m as typeof m & { tool_calls?: ChatToolCall[] };
       return {
         role: m.role === "developer" ? "system" : m.role,
-        content: typeof m.content === "string" ? m.content : partsToText(m.content),
+        content:
+          typeof m.content === "string" ? m.content : partsToText(m.content),
         ...(asst.tool_calls
           ? {
               tool_calls: asst.tool_calls.map((tc) => ({
@@ -77,8 +79,10 @@ export class OllamaAdapter implements BackendAdapter {
     if (req.temperature !== undefined) options.temperature = req.temperature;
     if (req.top_p !== undefined) options.top_p = req.top_p;
     if (req.max_tokens !== undefined) options.num_predict = req.max_tokens;
-    if (req.max_completion_tokens !== undefined) options.num_predict = req.max_completion_tokens;
-    if (req.stop !== undefined) options.stop = Array.isArray(req.stop) ? req.stop : [req.stop];
+    if (req.max_completion_tokens !== undefined)
+      options.num_predict = req.max_completion_tokens;
+    if (req.stop !== undefined)
+      options.stop = Array.isArray(req.stop) ? req.stop : [req.stop];
     if (req.seed !== undefined) options.seed = req.seed;
 
     return {
@@ -87,7 +91,9 @@ export class OllamaAdapter implements BackendAdapter {
       stream,
       ...(req.tools ? { tools: req.tools } : {}),
       ...(Object.keys(options).length ? { options } : {}),
-      ...(req.response_format?.type === "json_object" ? { format: "json" } : {}),
+      ...(req.response_format?.type === "json_object"
+        ? { format: "json" }
+        : {}),
       ...(req.response_format?.type === "json_schema"
         ? { format: req.response_format.json_schema.schema }
         : {}),
@@ -119,7 +125,8 @@ export class OllamaAdapter implements BackendAdapter {
       body: JSON.stringify(this.toOllamaBody(req, true)),
       signal,
     });
-    if (!res.ok || !res.body) throw new BackendError(res.status, res.body ? await res.text() : "");
+    if (!res.ok || !res.body)
+      throw new BackendError(res.status, res.body ? await res.text() : "");
 
     const id = `chatcmpl-ollama-${Date.now().toString(36)}`;
     const created = Math.floor(Date.now() / 1000);
@@ -162,7 +169,13 @@ export class OllamaAdapter implements BackendAdapter {
 
       choices.push({ index: 0, delta, finish_reason });
 
-      const chunk: ChatCompletionChunk = { id, object: "chat.completion.chunk", created, model, choices };
+      const chunk: ChatCompletionChunk = {
+        id,
+        object: "chat.completion.chunk",
+        created,
+        model,
+        choices,
+      };
 
       if (ev.done && ev.prompt_eval_count !== undefined) {
         chunk.usage = {
@@ -196,17 +209,19 @@ interface OllamaChatResponse {
 }
 
 function ollamaToOpenAI(r: OllamaChatResponse): ChatCompletionResponse {
-  const toolCalls: ChatToolCall[] | undefined = r.message?.tool_calls?.map((tc, i) => ({
-    id: `call_${Date.now().toString(36)}_${i}`,
-    type: "function",
-    function: {
-      name: tc.function.name,
-      arguments:
-        typeof tc.function.arguments === "string"
-          ? tc.function.arguments
-          : JSON.stringify(tc.function.arguments ?? {}),
-    },
-  }));
+  const toolCalls: ChatToolCall[] | undefined = r.message?.tool_calls?.map(
+    (tc, i) => ({
+      id: `call_${Date.now().toString(36)}_${i}`,
+      type: "function",
+      function: {
+        name: tc.function.name,
+        arguments:
+          typeof tc.function.arguments === "string"
+            ? tc.function.arguments
+            : JSON.stringify(tc.function.arguments ?? {}),
+      },
+    }),
+  );
 
   const finish_reason = toolCalls?.length
     ? "tool_calls"
@@ -241,7 +256,11 @@ function ollamaToOpenAI(r: OllamaChatResponse): ChatCompletionResponse {
 function partsToText(parts: unknown): string {
   if (!Array.isArray(parts)) return String(parts ?? "");
   return parts
-    .map((p) => (typeof p === "object" && p && "text" in p ? (p as { text: string }).text : ""))
+    .map((p) =>
+      typeof p === "object" && p && "text" in p
+        ? (p as { text: string }).text
+        : "",
+    )
     .join("");
 }
 
@@ -299,7 +318,9 @@ async function* toAsync(
     }
   } else {
     for await (const chunk of body as NodeJS.ReadableStream) {
-      yield typeof chunk === "string" ? new TextEncoder().encode(chunk) : (chunk as Uint8Array);
+      yield typeof chunk === "string"
+        ? new TextEncoder().encode(chunk)
+        : (chunk as Uint8Array);
     }
   }
 }

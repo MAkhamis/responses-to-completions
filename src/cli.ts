@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import "dotenv/config";
 /**
  * CLI: `responses-to-completions`
  *
@@ -19,10 +20,16 @@
  *   STORE_S3_BUCKET            required for s3
  *   STORE_S3_PREFIX            optional
  *   STORE_S3_REGION            optional (falls back to AWS SDK defaults)
+ *   STORE_S3_ACCESS_KEY_ID     optional AWS access key ID
+ *   STORE_S3_SECRET_ACCESS_KEY optional AWS secret access key
  *   MAX_ITERATIONS             default 10
  */
 import { createServer } from "./server/routes.js";
-import { OpenAICompatAdapter, OllamaAdapter } from "./backend/index.js";
+import {
+  OpenAICompatAdapter,
+  OllamaAdapter,
+  OpenRouterAdapter,
+} from "./backend/index.js";
 import { LocalFileStore, S3Store } from "./store/index.js";
 
 function envRequired(name: string): string {
@@ -47,6 +54,26 @@ function main(): void {
       host: process.env.OLLAMA_HOST,
       ...(forceModel ? { forceModel } : {}),
     });
+  } else if (backendKind === "openrouter") {
+    const providerOrder = process.env.OPENROUTER_PROVIDER_ORDER;
+    const providerIgnore = process.env.OPENROUTER_PROVIDER_IGNORE;
+    const providerOnly = process.env.OPENROUTER_PROVIDER_ONLY;
+    backend = new OpenRouterAdapter({
+      apiKey: envRequired("BACKEND_API_KEY"),
+      baseUrl: envRequired("BACKEND_BASE_URL"),
+      ...(forceModel ? { forceModel } : {}),
+      provider: {
+        ...(providerOrder ? { order: providerOrder.split(",").map((s) => s.trim()) } : {}),
+        ...(providerOnly ? { only: providerOnly.split(",").map((s) => s.trim()) } : {}),
+        ...(providerIgnore ? { ignore: providerIgnore.split(",").map((s) => s.trim()) } : {}),
+        ...(process.env.OPENROUTER_ALLOW_FALLBACKS !== undefined
+          ? { allow_fallbacks: process.env.OPENROUTER_ALLOW_FALLBACKS !== "false" }
+          : {}),
+        ...(process.env.OPENROUTER_DATA_COLLECTION
+          ? { data_collection: process.env.OPENROUTER_DATA_COLLECTION as "allow" | "deny" }
+          : {}),
+      },
+    });
   } else {
     backend = new OpenAICompatAdapter({
       baseUrl: envRequired("BACKEND_BASE_URL"),
@@ -58,10 +85,24 @@ function main(): void {
   const storeKind = (process.env.STORE ?? "local").toLowerCase();
   let store;
   if (storeKind === "s3") {
+    const s3AccessKeyId = process.env.STORE_S3_ACCESS_KEY_ID;
+    const s3SecretAccessKey = process.env.STORE_S3_SECRET_ACCESS_KEY;
     store = new S3Store({
       bucket: envRequired("STORE_S3_BUCKET"),
       prefix: process.env.STORE_S3_PREFIX,
-      clientConfig: process.env.STORE_S3_REGION ? { region: process.env.STORE_S3_REGION } : {},
+      clientConfig: {
+        ...(process.env.STORE_S3_REGION
+          ? { region: process.env.STORE_S3_REGION }
+          : {}),
+        ...(s3AccessKeyId && s3SecretAccessKey
+          ? {
+              credentials: {
+                accessKeyId: s3AccessKeyId,
+                secretAccessKey: s3SecretAccessKey,
+              },
+            }
+          : {}),
+      },
     });
   } else {
     store = new LocalFileStore(process.env.STORE_LOCAL_ROOT ?? "./.data");

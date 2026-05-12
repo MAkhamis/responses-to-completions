@@ -88,7 +88,10 @@ export class OpenAICompatAdapter implements BackendAdapter {
 }
 
 export class BackendError extends Error {
-  constructor(public status: number, public body: string) {
+  constructor(
+    public status: number,
+    public body: string,
+  ) {
     super(`Backend error ${status}: ${body.slice(0, 500)}`);
     this.name = "BackendError";
   }

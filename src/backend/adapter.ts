@@ -11,6 +11,12 @@ import type {
  */
 export interface BackendAdapter {
   readonly name: string;
-  complete(req: ChatCompletionRequest, signal?: AbortSignal): Promise<ChatCompletionResponse>;
-  stream(req: ChatCompletionRequest, signal?: AbortSignal): AsyncIterable<ChatCompletionChunk>;
+  complete(
+    req: ChatCompletionRequest,
+    signal?: AbortSignal,
+  ): Promise<ChatCompletionResponse>;
+  stream(
+    req: ChatCompletionRequest,
+    signal?: AbortSignal,
+  ): AsyncIterable<ChatCompletionChunk>;
 }

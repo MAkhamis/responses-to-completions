@@ -1,4 +1,9 @@
-import express, { type Express, type Request, type Response, type NextFunction } from "express";
+import express, {
+  type Express,
+  type Request,
+  type Response,
+  type NextFunction,
+} from "express";
 import { AgentLoop } from "../agent-loop.js";
 import type { BackendAdapter } from "../backend/adapter.js";
 import type { Store, ConversationItem } from "../store/store.js";
@@ -24,6 +29,19 @@ export interface RouteDeps {
  */
 export function createServer(deps: RouteDeps): Express {
   const app = express();
+  app.use((_req, res, next) => {
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
+    res.setHeader(
+      "Access-Control-Allow-Headers",
+      "Content-Type, Authorization",
+    );
+    if (_req.method === "OPTIONS") {
+      res.sendStatus(204);
+      return;
+    }
+    next();
+  });
   app.use(express.json({ limit: "50mb" }));
   mountRoutes(app, deps);
   app.use(errorHandler);
@@ -31,7 +49,10 @@ export function createServer(deps: RouteDeps): Express {
 }
 
 export function mountRoutes(app: Express, deps: RouteDeps): void {
-  const agent = new AgentLoop({ backend: deps.backend, maxIterations: deps.maxIterations });
+  const agent = new AgentLoop({
+    backend: deps.backend,
+    maxIterations: deps.maxIterations,
+  });
 
   // --- /v1/responses ---
   app.post("/v1/responses", async (req, res, next) => {
@@ -45,7 +66,10 @@ export function mountRoutes(app: Express, deps: RouteDeps): void {
   app.get("/v1/responses/:id", async (req, res, next) => {
     try {
       const resp = await deps.store.getResponse(req.params.id);
-      if (!resp) return res.status(404).json(errorBody("not_found", "Response not found"));
+      if (!resp)
+        return res
+          .status(404)
+          .json(errorBody("not_found", "Response not found"));
       res.json(resp);
     } catch (err) {
       next(err);
@@ -64,12 +88,21 @@ export function mountRoutes(app: Express, deps: RouteDeps): void {
   app.get("/v1/responses/:id/input_items", async (req, res, next) => {
     try {
       const resp = await deps.store.getResponse(req.params.id);
-      if (!resp) return res.status(404).json(errorBody("not_found", "Response not found"));
+      if (!resp)
+        return res
+          .status(404)
+          .json(errorBody("not_found", "Response not found"));
       // Our ResponseObject doesn't separately store input_items; we use the
       // conversation's item history up to (and including) this response. For
       // simplicity and until we persist per-response input snapshots, return
       // an empty list rather than lying about the data.
-      res.json({ object: "list", data: [], first_id: null, last_id: null, has_more: false });
+      res.json({
+        object: "list",
+        data: [],
+        first_id: null,
+        last_id: null,
+        has_more: false,
+      });
     } catch (err) {
       next(err);
     }
@@ -93,7 +126,10 @@ export function mountRoutes(app: Express, deps: RouteDeps): void {
   app.get("/v1/conversations/:id", async (req, res, next) => {
     try {
       const convo = await deps.store.getConversation(req.params.id);
-      if (!convo) return res.status(404).json(errorBody("not_found", "Conversation not found"));
+      if (!convo)
+        return res
+          .status(404)
+          .json(errorBody("not_found", "Conversation not found"));
       res.json(convo);
     } catch (err) {
       next(err);
@@ -105,7 +141,10 @@ export function mountRoutes(app: Express, deps: RouteDeps): void {
       const updated = await deps.store.updateConversation(req.params.id, {
         metadata: req.body?.metadata ?? null,
       });
-      if (!updated) return res.status(404).json(errorBody("not_found", "Conversation not found"));
+      if (!updated)
+        return res
+          .status(404)
+          .json(errorBody("not_found", "Conversation not found"));
       res.json(updated);
     } catch (err) {
       next(err);
@@ -114,7 +153,9 @@ export function mountRoutes(app: Express, deps: RouteDeps): void {
 
   app.delete("/v1/conversations/:id", async (req, res, next) => {
     try {
-      const { id, deleted } = await deps.store.deleteConversation(req.params.id);
+      const { id, deleted } = await deps.store.deleteConversation(
+        req.params.id,
+      );
       res.json({ id, object: "conversation.deleted", deleted });
     } catch (err) {
       next(err);
@@ -125,7 +166,9 @@ export function mountRoutes(app: Express, deps: RouteDeps): void {
     try {
       const limit = parseInt(String(req.query.limit ?? "100"), 10);
       const after = req.query.after ? String(req.query.after) : undefined;
-      const order = (req.query.order === "desc" ? "desc" : "asc") as "asc" | "desc";
+      const order = (req.query.order === "desc" ? "desc" : "asc") as
+        | "asc"
+        | "desc";
       const { items, hasMore } = await deps.store.listItems(req.params.id, {
         limit,
         after,
@@ -135,7 +178,9 @@ export function mountRoutes(app: Express, deps: RouteDeps): void {
         object: "list",
         data: items,
         first_id: items[0] ? getItemId(items[0]) : null,
-        last_id: items[items.length - 1] ? getItemId(items[items.length - 1]) : null,
+        last_id: items[items.length - 1]
+          ? getItemId(items[items.length - 1])
+          : null,
         has_more: hasMore,
       });
     } catch (err) {
@@ -163,7 +208,8 @@ export function mountRoutes(app: Express, deps: RouteDeps): void {
   app.get("/v1/conversations/:id/items/:itemId", async (req, res, next) => {
     try {
       const item = await deps.store.getItem(req.params.id, req.params.itemId);
-      if (!item) return res.status(404).json(errorBody("not_found", "Item not found"));
+      if (!item)
+        return res.status(404).json(errorBody("not_found", "Item not found"));
       res.json(item);
     } catch (err) {
       next(err);
@@ -173,7 +219,11 @@ export function mountRoutes(app: Express, deps: RouteDeps): void {
   app.delete("/v1/conversations/:id/items/:itemId", async (req, res, next) => {
     try {
       const r = await deps.store.deleteItem(req.params.id, req.params.itemId);
-      res.json({ id: r.id, object: "conversation.item.deleted", deleted: r.deleted });
+      res.json({
+        id: r.id,
+        object: "conversation.item.deleted",
+        deleted: r.deleted,
+      });
     } catch (err) {
       next(err);
     }
@@ -190,12 +240,27 @@ async function handleCreateResponse(
   agent: AgentLoop,
 ): Promise<void> {
   const body = req.body as CreateResponseRequest;
+  console.log(
+    "[request] path=%s backendPath=%s model=%s stream=%s reasoning=%s",
+    body?.model,
+    body?.stream ?? false,
+    body?.reasoning ? JSON.stringify(body.reasoning) : "none",
+  );
   if (!body?.model) {
-    res.status(400).json(errorBody("invalid_request_error", "`model` is required"));
+    res
+      .status(400)
+      .json(errorBody("invalid_request_error", "`model` is required"));
     return;
   }
   if (body.input === undefined && !body.previous_response_id) {
-    res.status(400).json(errorBody("invalid_request_error", "`input` or `previous_response_id` is required"));
+    res
+      .status(400)
+      .json(
+        errorBody(
+          "invalid_request_error",
+          "`input` or `previous_response_id` is required",
+        ),
+      );
     return;
   }
 
@@ -228,7 +293,10 @@ async function handleCreateResponse(
 
     try {
       const gen = agent.stream({ request: body, history, signal });
-      let result: { items: Awaited<ReturnType<typeof agent.run>>["items"]; usage: Awaited<ReturnType<typeof agent.run>>["usage"] } = { items: [], usage: null };
+      let result: {
+        items: Awaited<ReturnType<typeof agent.run>>["items"];
+        usage: Awaited<ReturnType<typeof agent.run>>["usage"];
+      } = { items: [], usage: null };
       while (true) {
         const r = await gen.next();
         if (r.done) {
@@ -250,7 +318,10 @@ async function handleCreateResponse(
       };
       if (body.store !== false) {
         if (conversationId) {
-          await deps.store.appendItems(conversationId, [...newInputItems, ...result.items]);
+          await deps.store.appendItems(conversationId, [
+            ...newInputItems,
+            ...result.items,
+          ]);
         }
         await deps.store.saveResponse(finalResp);
       }
@@ -294,7 +365,10 @@ async function handleCreateResponse(
     };
     if (body.store !== false) {
       if (conversationId) {
-        await deps.store.appendItems(conversationId, [...newInputItems, ...result.items]);
+        await deps.store.appendItems(conversationId, [
+          ...newInputItems,
+          ...result.items,
+        ]);
       }
       await deps.store.saveResponse(finalResp);
     }
@@ -321,7 +395,10 @@ async function resolveHistory(
 ): Promise<{ history: ConversationItem[]; conversationId: string | null }> {
   // Priority: explicit conversation > previous_response_id > none.
   if (body.conversation) {
-    const convId = typeof body.conversation === "string" ? body.conversation : body.conversation.id;
+    const convId =
+      typeof body.conversation === "string"
+        ? body.conversation
+        : body.conversation.id;
     // Auto-create conversation if it doesn't exist so clients can use client-generated IDs.
     const existing = await store.getConversation(convId);
     if (!existing) {
@@ -335,7 +412,10 @@ async function resolveHistory(
   if (body.previous_response_id) {
     const prev = await store.getResponse(body.previous_response_id);
     if (!prev) {
-      throw new HttpError(400, `previous_response_id not found: ${body.previous_response_id}`);
+      throw new HttpError(
+        400,
+        `previous_response_id not found: ${body.previous_response_id}`,
+      );
     }
     // If the previous response was associated with a conversation, continue it.
     if (prev.conversation?.id) {
@@ -349,10 +429,14 @@ async function resolveHistory(
   return { history: [], conversationId: null };
 }
 
-function normalizeNewInputItems(input: string | InputItem[] | undefined): ConversationItem[] {
+function normalizeNewInputItems(
+  input: string | InputItem[] | undefined,
+): ConversationItem[] {
   if (input === undefined) return [];
   if (typeof input === "string") {
-    return [{ type: "message", role: "user", content: input }] as ConversationItem[];
+    return [
+      { type: "message", role: "user", content: input },
+    ] as ConversationItem[];
   }
   return input as ConversationItem[];
 }
@@ -390,7 +474,9 @@ function aggregateText(items: ConversationItem[]): string {
   let out = "";
   for (const it of items) {
     if ((it as { type?: string }).type === "message") {
-      const parts = (it as { content?: Array<{ type: string; text?: string }> }).content ?? [];
+      const parts =
+        (it as { content?: Array<{ type: string; text?: string }> }).content ??
+        [];
       for (const p of parts) {
         if (p.type === "output_text" && p.text) out += p.text;
       }
@@ -400,11 +486,18 @@ function aggregateText(items: ConversationItem[]): string {
 }
 
 function getItemId(item: ConversationItem): string | null {
-  return ((item as { id?: string }).id ?? (item as { call_id?: string }).call_id) ?? null;
+  return (
+    (item as { id?: string }).id ??
+    (item as { call_id?: string }).call_id ??
+    null
+  );
 }
 
 class HttpError extends Error {
-  constructor(public status: number, msg: string) {
+  constructor(
+    public status: number,
+    msg: string,
+  ) {
     super(msg);
   }
 }
@@ -413,9 +506,16 @@ function errorBody(code: string, message: string) {
   return { error: { code, message, type: "invalid_request_error" } };
 }
 
-function errorHandler(err: unknown, _req: Request, res: Response, _next: NextFunction): void {
+function errorHandler(
+  err: unknown,
+  _req: Request,
+  res: Response,
+  _next: NextFunction,
+): void {
   if (err instanceof HttpError) {
-    res.status(err.status).json(errorBody("invalid_request_error", err.message));
+    res
+      .status(err.status)
+      .json(errorBody("invalid_request_error", err.message));
     return;
   }
   const message = err instanceof Error ? err.message : String(err);

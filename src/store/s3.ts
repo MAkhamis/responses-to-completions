@@ -51,7 +51,10 @@ export class S3Store implements Store {
     const prev = this.locks.get(key) ?? Promise.resolve();
     let release!: () => void;
     const next = new Promise<void>((r) => (release = r));
-    this.locks.set(key, prev.then(() => next));
+    this.locks.set(
+      key,
+      prev.then(() => next),
+    );
     await prev;
     try {
       return await fn();
@@ -70,7 +73,9 @@ export class S3Store implements Store {
       if (!body) return null;
       return JSON.parse(body) as T;
     } catch (e) {
-      const name = (e as { name?: string; Code?: string }).name ?? (e as { Code?: string }).Code;
+      const name =
+        (e as { name?: string; Code?: string }).name ??
+        (e as { Code?: string }).Code;
       if (name === "NoSuchKey" || name === "NotFound") return null;
       throw e;
     }
@@ -89,7 +94,9 @@ export class S3Store implements Store {
 
   private async del(key: string): Promise<boolean> {
     try {
-      await this.client.send(new DeleteObjectCommand({ Bucket: this.bucket, Key: key }));
+      await this.client.send(
+        new DeleteObjectCommand({ Bucket: this.bucket, Key: key }),
+      );
       return true;
     } catch (e) {
       const name = (e as { name?: string }).name;
@@ -118,9 +125,9 @@ export class S3Store implements Store {
   }
 
   async getConversation(id: string): Promise<ConversationObject | null> {
-    const data = await this.getJson<ConversationObject & { items: ConversationItem[] }>(
-      this.key("conversations", id),
-    );
+    const data = await this.getJson<
+      ConversationObject & { items: ConversationItem[] }
+    >(this.key("conversations", id));
     if (!data) return null;
     const { items: _omit, ...meta } = data;
     return meta;
@@ -131,9 +138,9 @@ export class S3Store implements Store {
     patch: { metadata?: Record<string, string> | null },
   ): Promise<ConversationObject | null> {
     return this.withLock(`conv:${id}`, async () => {
-      const data = await this.getJson<ConversationObject & { items: ConversationItem[] }>(
-        this.key("conversations", id),
-      );
+      const data = await this.getJson<
+        ConversationObject & { items: ConversationItem[] }
+      >(this.key("conversations", id));
       if (!data) return null;
       if (patch.metadata !== undefined) data.metadata = patch.metadata;
       await this.putJson(this.key("conversations", id), data);
@@ -142,18 +149,23 @@ export class S3Store implements Store {
     });
   }
 
-  async deleteConversation(id: string): Promise<{ id: string; deleted: boolean }> {
+  async deleteConversation(
+    id: string,
+  ): Promise<{ id: string; deleted: boolean }> {
     const deleted = await this.del(this.key("conversations", id));
     return { id, deleted };
   }
 
   // ---- items ----
-  async appendItems(conversationId: string, items: ConversationItem[]): Promise<void> {
+  async appendItems(
+    conversationId: string,
+    items: ConversationItem[],
+  ): Promise<void> {
     if (items.length === 0) return;
     await this.withLock(`conv:${conversationId}`, async () => {
-      const data = await this.getJson<ConversationObject & { items: ConversationItem[] }>(
-        this.key("conversations", conversationId),
-      );
+      const data = await this.getJson<
+        ConversationObject & { items: ConversationItem[] }
+      >(this.key("conversations", conversationId));
       if (!data) throw new Error(`Conversation not found: ${conversationId}`);
       data.items.push(...items);
       await this.putJson(this.key("conversations", conversationId), data);
@@ -164,9 +176,9 @@ export class S3Store implements Store {
     conversationId: string,
     opts?: { limit?: number; after?: string; order?: "asc" | "desc" },
   ): Promise<{ items: ConversationItem[]; hasMore: boolean }> {
-    const data = await this.getJson<ConversationObject & { items: ConversationItem[] }>(
-      this.key("conversations", conversationId),
-    );
+    const data = await this.getJson<
+      ConversationObject & { items: ConversationItem[] }
+    >(this.key("conversations", conversationId));
     if (!data) return { items: [], hasMore: false };
 
     let items = data.items.slice();
@@ -184,9 +196,9 @@ export class S3Store implements Store {
     conversationId: string,
     itemId: string,
   ): Promise<ConversationItem | null> {
-    const data = await this.getJson<ConversationObject & { items: ConversationItem[] }>(
-      this.key("conversations", conversationId),
-    );
+    const data = await this.getJson<
+      ConversationObject & { items: ConversationItem[] }
+    >(this.key("conversations", conversationId));
     if (!data) return null;
     return data.items.find((it) => getItemId(it) === itemId) ?? null;
   }
@@ -196,9 +208,9 @@ export class S3Store implements Store {
     itemId: string,
   ): Promise<{ id: string; deleted: boolean }> {
     return this.withLock(`conv:${conversationId}`, async () => {
-      const data = await this.getJson<ConversationObject & { items: ConversationItem[] }>(
-        this.key("conversations", conversationId),
-      );
+      const data = await this.getJson<
+        ConversationObject & { items: ConversationItem[] }
+      >(this.key("conversations", conversationId));
       if (!data) return { id: itemId, deleted: false };
       const before = data.items.length;
       data.items = data.items.filter((it) => getItemId(it) !== itemId);

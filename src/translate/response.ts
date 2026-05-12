@@ -1,11 +1,16 @@
-import type { ChatCompletionResponse, ChatCompletionUsage } from "../types/completions.js";
+import type {
+  ChatCompletionResponse,
+  ChatCompletionUsage,
+  ReasoningDetail,
+} from "../types/completions.js";
 import type {
   FunctionCallItem,
   OutputItem,
   OutputMessageItem,
+  ReasoningItem,
   Usage,
 } from "../types/responses.js";
-import { genFcId, genMessageId } from "../util/ids.js";
+import { genFcId, genMessageId, genReasoningId } from "../util/ids.js";
 
 /**
  * Converts a single chat-completion choice into a list of Responses-API
@@ -14,14 +19,41 @@ import { genFcId, genMessageId } from "../util/ids.js";
  *
  * Refusals and reasoning traces are propagated when present.
  */
-export function completionToOutputItems(
-  resp: ChatCompletionResponse,
-): { items: OutputItem[]; outputText: string } {
+export function completionToOutputItems(resp: ChatCompletionResponse): {
+  items: OutputItem[];
+  outputText: string;
+} {
   const choice = resp.choices[0];
   if (!choice) return { items: [], outputText: "" };
   const msg = choice.message;
   const items: OutputItem[] = [];
   let outputText = "";
+
+  const encryptedBlobs: ReasoningDetail[] =
+    msg.reasoning_details?.filter((d) => d.type === "reasoning.encrypted") ??
+    [];
+  const reasoningFromDetails =
+    msg.reasoning_details
+      ?.filter((d) => d.type !== "reasoning.encrypted")
+      .map((d) => d.text || d.summary || "")
+      .join("") || null;
+
+  const reasoningText =
+    msg.reasoning_content || msg.reasoning || reasoningFromDetails;
+  if (reasoningText || encryptedBlobs.length > 0) {
+    const reasoning: ReasoningItem = {
+      type: "reasoning",
+      id: genReasoningId(),
+      status: "completed",
+      content: reasoningText
+        ? [{ type: "reasoning_text", text: reasoningText }]
+        : [],
+      ...(encryptedBlobs.length > 0
+        ? { encrypted_content: JSON.stringify(encryptedBlobs) }
+        : {}),
+    };
+    items.push(reasoning);
+  }
 
   // Text / refusal → message item
   const contentText = messageContentToText(msg.content);
@@ -82,7 +114,11 @@ export function translateUsage(u?: ChatCompletionUsage): Usage | null {
     output_tokens: u.completion_tokens,
     total_tokens: u.total_tokens,
     ...(u.prompt_tokens_details
-      ? { input_tokens_details: { cached_tokens: u.prompt_tokens_details.cached_tokens ?? 0 } }
+      ? {
+          input_tokens_details: {
+            cached_tokens: u.prompt_tokens_details.cached_tokens ?? 0,
+          },
+        }
       : {}),
     ...(u.completion_tokens_details
       ? {

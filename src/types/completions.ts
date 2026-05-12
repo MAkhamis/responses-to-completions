@@ -4,7 +4,12 @@
  * Ollama's /v1/chat/completions, llama.cpp server, LiteLLM, Together, Groq.
  */
 
-export type CompletionsRole = "system" | "developer" | "user" | "assistant" | "tool";
+export type CompletionsRole =
+  | "system"
+  | "developer"
+  | "user"
+  | "assistant"
+  | "tool";
 
 export interface TextContentPart {
   type: "text";
@@ -36,6 +41,9 @@ export interface AssistantMessage {
   name?: string;
   tool_calls?: ChatToolCall[];
   refusal?: string | null;
+  reasoning_content?: string | null;
+  reasoning?: string | null;
+  reasoning_details?: ReasoningDetail[] | null;
 }
 
 export interface ToolMessage {
@@ -44,7 +52,11 @@ export interface ToolMessage {
   tool_call_id: string;
 }
 
-export type ChatMessage = SystemMessage | UserMessage | AssistantMessage | ToolMessage;
+export type ChatMessage =
+  | SystemMessage
+  | UserMessage
+  | AssistantMessage
+  | ToolMessage;
 
 export interface ChatToolCall {
   id: string;
@@ -91,16 +103,33 @@ export interface ChatCompletionRequest {
   response_format?:
     | { type: "text" }
     | { type: "json_object" }
-    | { type: "json_schema"; json_schema: { name: string; schema: Record<string, unknown>; strict?: boolean } };
+    | {
+        type: "json_schema";
+        json_schema: {
+          name: string;
+          schema: Record<string, unknown>;
+          strict?: boolean;
+        };
+      };
   seed?: number;
   user?: string;
   metadata?: Record<string, string>;
+  reasoning?: {
+    effort?: "minimal" | "low" | "medium" | "high";
+    summary?: "auto" | "concise" | "detailed";
+  };
 }
 
 export interface ChatCompletionChoice {
   index: number;
   message: AssistantMessage;
-  finish_reason: "stop" | "length" | "tool_calls" | "content_filter" | "function_call" | null;
+  finish_reason:
+    | "stop"
+    | "length"
+    | "tool_calls"
+    | "content_filter"
+    | "function_call"
+    | null;
   logprobs?: unknown;
 }
 
@@ -131,6 +160,16 @@ export interface ChatDeltaToolCall {
   function?: { name?: string; arguments?: string };
 }
 
+export interface ReasoningDetail {
+  type: "reasoning.text" | "reasoning.summary" | "reasoning.encrypted" | string;
+  text?: string;
+  summary?: string;
+  data?: string;
+  id?: string;
+  format?: string;
+  index?: number;
+}
+
 export interface ChatCompletionChunkChoice {
   index: number;
   delta: {
@@ -139,6 +178,8 @@ export interface ChatCompletionChunkChoice {
     tool_calls?: ChatDeltaToolCall[];
     refusal?: string | null;
     reasoning_content?: string | null;
+    reasoning?: string | null;
+    reasoning_details?: ReasoningDetail[] | null;
   };
   finish_reason: ChatCompletionChoice["finish_reason"];
   logprobs?: unknown;
