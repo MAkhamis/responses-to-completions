@@ -1,7 +1,10 @@
 /**
  * Parses a ReadableStream of SSE (Server-Sent Events) data lines into
  * JSON objects. Handles the `data: ` prefix, the `[DONE]` sentinel used by
- * OpenAI-compatible servers, and multi-line events.
+ * OpenAI-compatible servers, and multi-line events. If an `event:` line is
+ * present and the JSON payload is an object without its own `type` field,
+ * the event name is injected as `type` so callers dispatching on `type`
+ * work with providers that put the event kind in the SSE frame.
  */
 export async function* parseSSE<T>(
   body: ReadableStream<Uint8Array> | NodeJS.ReadableStream,
@@ -17,17 +20,14 @@ export async function* parseSSE<T>(
     while (boundary !== -1) {
       const raw = buffer.slice(0, boundary);
       buffer = buffer.slice(boundary + 2);
-      const data = parseEvent(raw);
-      if (data === null) {
+      const parsed = parseEvent(raw);
+      if (parsed === null) {
         // comment or empty event
-      } else if (data === "[DONE]") {
+      } else if (parsed.data === "[DONE]") {
         return;
       } else {
-        try {
-          yield JSON.parse(data) as T;
-        } catch {
-          // skip malformed
-        }
+        const value = decodeJson<T>(parsed);
+        if (value !== undefined) yield value;
       }
       boundary = buffer.indexOf("\n\n");
     }
@@ -35,26 +35,48 @@ export async function* parseSSE<T>(
   // flush
   buffer += decoder.decode();
   const tail = parseEvent(buffer);
-  if (tail && tail !== "[DONE]") {
-    try {
-      yield JSON.parse(tail) as T;
-    } catch {
-      // ignore
-    }
+  if (tail && tail.data !== "[DONE]") {
+    const value = decodeJson<T>(tail);
+    if (value !== undefined) yield value;
   }
 }
 
-function parseEvent(raw: string): string | null {
+function decodeJson<T>(parsed: {
+  event?: string;
+  data: string;
+}): T | undefined {
+  let value: unknown;
+  try {
+    value = JSON.parse(parsed.data);
+  } catch {
+    return undefined;
+  }
+  if (
+    parsed.event &&
+    value !== null &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    (value as Record<string, unknown>).type === undefined
+  ) {
+    (value as Record<string, unknown>).type = parsed.event;
+  }
+  return value as T;
+}
+
+function parseEvent(raw: string): { event?: string; data: string } | null {
   const lines = raw.split(/\r?\n/);
   const data: string[] = [];
+  let event: string | undefined;
   for (const line of lines) {
     if (!line || line.startsWith(":")) continue;
     if (line.startsWith("data:")) {
       data.push(line.slice(5).replace(/^ /, ""));
+    } else if (line.startsWith("event:")) {
+      event = line.slice(6).replace(/^ /, "");
     }
   }
   if (data.length === 0) return null;
-  return data.join("\n");
+  return { event, data: data.join("\n") };
 }
 
 async function* toAsyncIterable(
@@ -73,7 +95,9 @@ async function* toAsyncIterable(
     }
   } else {
     for await (const chunk of body as NodeJS.ReadableStream) {
-      yield typeof chunk === "string" ? new TextEncoder().encode(chunk) : (chunk as Uint8Array);
+      yield typeof chunk === "string"
+        ? new TextEncoder().encode(chunk)
+        : (chunk as Uint8Array);
     }
   }
 }

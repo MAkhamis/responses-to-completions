@@ -1,23 +1,32 @@
 /**
  * responses-to-completions
  *
- * Drop-in proxy that exposes the OpenAI Responses API on top of any
- * OpenAI-compatible /v1/chat/completions backend.
+ * SDK that exposes the OpenAI Responses API as a high-level client class
+ * on top of any OpenAI-compatible chat-completions backend. Handles
+ * conversation state, MCP tool execution, and streaming event translation.
  */
 
-export { createServer, mountRoutes, type RouteDeps } from "./server/routes.js";
-export { SseWriter } from "./server/sse-writer.js";
+// Headline export — the SDK client.
+export {
+  ResponsesClient,
+  StreamResponse,
+  type ResponsesClientOptions,
+} from "./client.js";
 
+// Lower-level building blocks for advanced users who want to bypass the client.
 export { AgentLoop, type AgentRunContext, type AgentRunResult } from "./agent-loop.js";
+export { resolveHistory, type ResolvedHistory } from "./history.js";
 
 // Backends
 export {
   OpenAICompatAdapter,
   OllamaAdapter,
+  OpenRouterAdapter,
   BackendError,
   type BackendAdapter,
   type OpenAICompatAdapterOptions,
   type OllamaAdapterOptions,
+  type OpenRouterAdapterOptions,
 } from "./backend/index.js";
 
 // Stores
@@ -35,7 +44,7 @@ export { McpConnection, needsApproval, type McpToolInfo } from "./mcp/index.js";
 // Types
 export * from "./types/index.js";
 
-// Translators (exposed for users who want to build their own server)
+// Translators (exposed for users who want to build their own orchestration)
 export {
   itemsToMessages,
   translateTools,

@@ -3,6 +3,7 @@ import type {
   ChatMessage,
   ChatToolCall,
   ChatToolChoice,
+  ReasoningDetail,
 } from "../types/completions.js";
 import type {
   CreateResponseRequest,
@@ -11,6 +12,7 @@ import type {
   InputItem,
   InputMessageItem,
   OutputItem,
+  ReasoningItem,
   ResponseTextFormat,
   ToolChoice,
   ToolDef,
@@ -48,13 +50,11 @@ export function itemsToMessages(
     msgs.push({ role: "system", content: instructions });
   }
 
-  const all: ConversationItem[] = [
-    ...history,
-    ...normalizeInput(newInput),
-  ];
+  const all: ConversationItem[] = [...history, ...normalizeInput(newInput)];
 
+  let pendingEncrypted: ReasoningDetail[] | null = null;
   for (const item of all) {
-    pushItem(msgs, item);
+    pendingEncrypted = pushItem(msgs, item, pendingEncrypted);
   }
   return msgs;
 }
@@ -67,17 +67,39 @@ function normalizeInput(input: string | InputItem[] | undefined): InputItem[] {
   return input;
 }
 
-function pushItem(msgs: ChatMessage[], item: ConversationItem): void {
+function pushItem(
+  msgs: ChatMessage[],
+  item: ConversationItem,
+  pendingEncrypted: ReasoningDetail[] | null,
+): ReasoningDetail[] | null {
   const t = (item as { type?: string }).type;
+
+  if (t === "reasoning") {
+    const r = item as ReasoningItem;
+    if (r.encrypted_content) {
+      try {
+        return JSON.parse(r.encrypted_content) as ReasoningDetail[];
+      } catch {}
+    }
+    return pendingEncrypted;
+  }
 
   // Message item (input or output).
   if (!t || t === "message") {
     const m = item as InputMessageItem;
     const content = messageContentToText(m.content);
     const role = m.role === "developer" ? "system" : m.role;
-    if (role === "tool") return; // shouldn't appear as a message item; handled via function_call_output
-    msgs.push({ role: role as "system" | "user" | "assistant", content });
-    return;
+    if (role === "tool") return pendingEncrypted; // handled via function_call_output
+    const msg: ChatMessage = {
+      role: role as "system" | "user" | "assistant",
+      content,
+    };
+    if (role === "assistant" && pendingEncrypted) {
+      (msg as { reasoning_details?: ReasoningDetail[] }).reasoning_details =
+        pendingEncrypted;
+    }
+    msgs.push(msg);
+    return null;
   }
 
   if (t === "function_call") {
@@ -92,20 +114,37 @@ function pushItem(msgs: ChatMessage[], item: ConversationItem): void {
     if (tail && tail.role === "assistant") {
       tail.tool_calls = [...(tail.tool_calls ?? []), toolCall];
       if (tail.content === undefined) tail.content = null;
+      if (pendingEncrypted) {
+        (tail as { reasoning_details?: ReasoningDetail[] }).reasoning_details =
+          pendingEncrypted;
+      }
+      return null;
     } else {
-      msgs.push({ role: "assistant", content: null, tool_calls: [toolCall] });
+      const msg: ChatMessage = {
+        role: "assistant",
+        content: null,
+        tool_calls: [toolCall],
+      };
+      if (pendingEncrypted) {
+        (msg as { reasoning_details?: ReasoningDetail[] }).reasoning_details =
+          pendingEncrypted;
+      }
+      msgs.push(msg);
+      return null;
     }
-    return;
   }
 
   if (t === "function_call_output") {
     const fo = item as FunctionCallOutputItem;
-    msgs.push({ role: "tool", tool_call_id: fo.call_id, content: fo.output ?? "" });
-    return;
+    msgs.push({
+      role: "tool",
+      tool_call_id: fo.call_id,
+      content: fo.output ?? "",
+    });
+    return pendingEncrypted;
   }
 
-  // reasoning / mcp_* / mcp_list_tools are intentionally skipped when
-  // rehydrating messages for the backend — see header comment.
+  return pendingEncrypted;
 }
 
 function messageContentToText(
@@ -126,7 +165,9 @@ function messageContentToText(
     .join("");
 }
 
-export function translateTools(tools: ToolDef[] | undefined): ChatFunctionTool[] | undefined {
+export function translateTools(
+  tools: ToolDef[] | undefined,
+): ChatFunctionTool[] | undefined {
   if (!tools || tools.length === 0) return undefined;
   const out: ChatFunctionTool[] = [];
   for (const t of tools) {
@@ -147,17 +188,22 @@ export function translateTools(tools: ToolDef[] | undefined): ChatFunctionTool[]
   return out.length ? out : undefined;
 }
 
-export function translateToolChoice(tc: ToolChoice | undefined): ChatToolChoice | undefined {
+export function translateToolChoice(
+  tc: ToolChoice | undefined,
+): ChatToolChoice | undefined {
   if (tc === undefined) return undefined;
   if (typeof tc === "string") return tc;
-  if (tc.type === "function") return { type: "function", function: { name: tc.name } };
+  if (tc.type === "function")
+    return { type: "function", function: { name: tc.name } };
   // MCP tool choice — the agent loop enforces this when selecting tools.
   return "auto";
 }
 
 export function translateResponseFormat(
   text: CreateResponseRequest["text"],
-): NonNullable<CreateResponseRequest["text"]> extends { format?: ResponseTextFormat }
+): NonNullable<CreateResponseRequest["text"]> extends {
+  format?: ResponseTextFormat;
+}
   ? import("../types/completions.js").ChatCompletionRequest["response_format"]
   : undefined {
   const fmt = text?.format;
