@@ -179,7 +179,6 @@ export async function* translateChunkStream(
       delta.reasoning_details?.filter(
         (d) => d.type === "reasoning.encrypted",
       ) ?? [];
-    if (newEncrypted.length > 0) encryptedBlobs.push(...newEncrypted);
     const reasoningFromDetails =
       delta.reasoning_details
         ?.filter((d) => d.type !== "reasoning.encrypted")
@@ -188,7 +187,10 @@ export async function* translateChunkStream(
 
     const reasoningDelta =
       delta.reasoning_content || delta.reasoning || reasoningFromDetails;
-    if (typeof reasoningDelta === "string" && reasoningDelta.length > 0) {
+    const hasReasoningText =
+      typeof reasoningDelta === "string" && reasoningDelta.length > 0;
+
+    if (newEncrypted.length > 0 || hasReasoningText) {
       if (!reasoningItem) {
         reasoningItem = {
           type: "reasoning",
@@ -204,13 +206,18 @@ export async function* translateChunkStream(
           item: reasoningItem,
         };
       }
-      reasoningText += reasoningDelta;
+    }
+
+    if (newEncrypted.length > 0) encryptedBlobs.push(...newEncrypted);
+
+    if (hasReasoningText) {
+      reasoningText += reasoningDelta!;
       yield {
         type: "response.reasoning_summary_text.delta",
         sequence_number: nextSeq(),
-        item_id: reasoningItem.id,
+        item_id: reasoningItem!.id,
         output_index: reasoningOutputIndex,
-        delta: reasoningDelta,
+        delta: reasoningDelta!,
       };
     }
 
@@ -375,26 +382,16 @@ export async function* translateChunkStream(
     }
   }
 
+  if (reasoningItem && encryptedBlobs.length > 0) {
+    reasoningItem.encrypted_content = JSON.stringify(encryptedBlobs);
+  }
+
   // Assemble final items in output-index order.
   const allItems: OutputItem[] = [];
   if (reasoningItem) allItems[reasoningOutputIndex] = reasoningItem;
   if (messageItem) allItems[messageOutputIndex] = messageItem;
   for (const state of tools.values()) allItems[state.outputIndex] = state.item;
-  const ordered = allItems.filter((x): x is OutputItem => !!x);
-
-  const items: OutputItem[] =
-    encryptedBlobs.length > 0
-      ? [
-          {
-            type: "reasoning",
-            id: genReasoningId(),
-            status: "completed",
-            content: [],
-            encrypted_content: JSON.stringify(encryptedBlobs),
-          } satisfies ReasoningItem,
-          ...ordered,
-        ]
-      : ordered;
+  const items = allItems.filter((x): x is OutputItem => !!x);
 
   return { items, usage: translateUsage(usage) };
 }

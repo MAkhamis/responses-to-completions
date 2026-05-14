@@ -3,6 +3,11 @@ import type {
   ChatCompletionRequest,
   ChatCompletionResponse,
 } from "../types/completions.js";
+import type {
+  CreateResponseRequest,
+  ResponseObject,
+} from "../types/responses.js";
+import type { StreamEvent } from "../translate/stream.js";
 import type { BackendAdapter } from "./adapter.js";
 import { BackendError } from "./openai-compat.js";
 import { parseSSE } from "./sse.js";
@@ -49,16 +54,24 @@ export interface OpenRouterAdapterOptions {
   forceModel?: string;
   /** Provider routing preferences applied to every request. */
   provider?: OpenRouterProviderPreferences;
+  /**
+   * Which upstream endpoint to call:
+   *  - `"completions"` (default) → `POST {baseUrl}/chat/completions`
+   *  - `"responses"`             → `POST {baseUrl}/responses`
+   */
+  endpoint?: "completions" | "responses";
 }
 
 export class OpenRouterAdapter implements BackendAdapter {
   readonly name = "openrouter";
+  readonly mode: "completions" | "responses";
   private baseUrl: string;
   private fetch: typeof fetch;
 
   constructor(private opts: OpenRouterAdapterOptions) {
     this.baseUrl = (opts.baseUrl ?? OPENROUTER_BASE_URL).replace(/\/+$/, "");
     this.fetch = opts.fetch ?? fetch;
+    this.mode = opts.endpoint ?? "completions";
   }
 
   private headers(extra?: Record<string, string>) {
@@ -73,9 +86,9 @@ export class OpenRouterAdapter implements BackendAdapter {
     return h;
   }
 
-  private prepare(
-    req: ChatCompletionRequest,
-  ): ChatCompletionRequest & { provider?: OpenRouterProviderPreferences } {
+  private prepare<T extends { model: string }>(
+    req: T,
+  ): T & { provider?: OpenRouterProviderPreferences } {
     return {
       ...req,
       ...(this.opts.forceModel ? { model: this.opts.forceModel } : {}),
@@ -83,6 +96,7 @@ export class OpenRouterAdapter implements BackendAdapter {
     };
   }
 
+  // ---- chat-completions endpoint ------------------------------------------
   async complete(
     req: ChatCompletionRequest,
     signal?: AbortSignal,
@@ -115,10 +129,47 @@ export class OpenRouterAdapter implements BackendAdapter {
       signal,
     });
     if (!res.ok || !res.body) {
-      const body = res.body ? await res.text() : "(no body)";
+      const body = await res.text().catch(() => "(no body)");
       throw new BackendError(res.status, body);
     }
     for await (const ev of parseSSE<ChatCompletionChunk>(res.body)) {
+      yield ev;
+    }
+  }
+
+  // ---- responses endpoint -------------------------------------------------
+  async respond(
+    req: CreateResponseRequest,
+    signal?: AbortSignal,
+  ): Promise<ResponseObject> {
+    const res = await this.fetch(`${this.baseUrl}/responses`, {
+      method: "POST",
+      headers: this.headers(),
+      body: JSON.stringify({ ...this.prepare(req), stream: false }),
+      signal,
+    });
+    if (!res.ok) {
+      const body = await res.text();
+      throw new BackendError(res.status, body);
+    }
+    return (await res.json()) as ResponseObject;
+  }
+
+  async *respondStream(
+    req: CreateResponseRequest,
+    signal?: AbortSignal,
+  ): AsyncGenerator<StreamEvent> {
+    const res = await this.fetch(`${this.baseUrl}/responses`, {
+      method: "POST",
+      headers: this.headers({ accept: "text/event-stream" }),
+      body: JSON.stringify({ ...this.prepare(req), stream: true }),
+      signal,
+    });
+    if (!res.ok || !res.body) {
+      const body = await res.text().catch(() => "(no body)");
+      throw new BackendError(res.status, body);
+    }
+    for await (const ev of parseSSE<StreamEvent>(res.body)) {
       yield ev;
     }
   }

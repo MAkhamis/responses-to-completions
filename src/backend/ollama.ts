@@ -31,6 +31,7 @@ export interface OllamaAdapterOptions {
  */
 export class OllamaAdapter implements BackendAdapter {
   readonly name = "ollama";
+  readonly mode = "completions" as const;
   private host: string;
   private fetch: typeof fetch;
 

@@ -10,6 +10,7 @@ import type {
 import type {
   CreateResponseRequest,
   FunctionCallItem,
+  InputItem,
   McpApprovalRequestItem,
   McpApprovalResponseItem,
   McpCallItem,
@@ -65,6 +66,15 @@ export class AgentLoop {
 
   /** Non-streaming execution. */
   async run(ctx: AgentRunContext): Promise<AgentRunResult> {
+    if (this.deps.backend.mode === "responses") {
+      return this.runViaResponses(ctx);
+    }
+    const complete = this.deps.backend.complete;
+    if (!complete) {
+      throw new Error(
+        `Backend "${this.deps.backend.name}" declares mode "completions" but does not implement complete().`,
+      );
+    }
     const mcpSetup = await this.setupMcp(ctx.request.tools);
     const clientFunctionTools = collectClientFunctionTools(ctx.request.tools);
     const producedItems: OutputItem[] = [...mcpSetup.listItems];
@@ -85,7 +95,7 @@ export class AgentLoop {
           messages,
           chatTools,
         );
-        const resp = await this.deps.backend.complete(req, ctx.signal);
+        const resp = await complete.call(this.deps.backend, req, ctx.signal);
         usage = mergeUsage(usage, translateUsage(resp.usage));
 
         const { items: newItems, outputText: _ } =
@@ -158,6 +168,15 @@ export class AgentLoop {
   async *stream(
     ctx: AgentRunContext,
   ): AsyncGenerator<StreamEvent, AgentRunResult> {
+    if (this.deps.backend.mode === "responses") {
+      return yield* this.streamViaResponses(ctx);
+    }
+    const stream = this.deps.backend.stream;
+    if (!stream) {
+      throw new Error(
+        `Backend "${this.deps.backend.name}" declares mode "completions" but does not implement stream().`,
+      );
+    }
     const mcpSetup = await this.setupMcp(ctx.request.tools);
     const clientFunctionTools = collectClientFunctionTools(ctx.request.tools);
     const producedItems: OutputItem[] = [];
@@ -196,7 +215,7 @@ export class AgentLoop {
           messages,
           chatTools,
         );
-        const chunks = this.deps.backend.stream(req, ctx.signal);
+        const chunks = stream.call(this.deps.backend, req, ctx.signal);
         const snapshot = snapshotResponseFor(ctx, producedItems);
         const gen = translateChunkStream(
           reindexChunks(chunks, producedItems.length),
@@ -278,6 +297,84 @@ export class AgentLoop {
     } finally {
       await mcpSetup.close();
     }
+  }
+
+  // --- responses-endpoint pass-through ---
+
+  /**
+   * Non-streaming pass-through for adapters whose `mode === "responses"`.
+   * Forwards the full request to the upstream `/responses` endpoint with the
+   * locally-resolved history rolled into the `input` field, then returns the
+   * upstream output as agent-result items + usage. Conversation and
+   * previous_response_id are managed by the SDK's own store, so they're
+   * stripped before forwarding.
+   */
+  private async runViaResponses(
+    ctx: AgentRunContext,
+  ): Promise<AgentRunResult> {
+    if (!this.deps.backend.respond) {
+      throw new Error(
+        `Backend "${this.deps.backend.name}" declares mode "responses" but does not implement respond().`,
+      );
+    }
+    const upstreamReq = buildResponsesPassthrough(ctx, false);
+    const resp = await this.deps.backend.respond(upstreamReq, ctx.signal);
+    if (resp.status === "failed" && resp.error) {
+      throw new Error(`Upstream /responses failed: ${resp.error.message}`);
+    }
+    return { items: resp.output, usage: resp.usage };
+  }
+
+  /**
+   * Streaming pass-through for adapters whose `mode === "responses"`.
+   * Forwards upstream `StreamEvent`s out unchanged with one exception: we
+   * swallow the upstream-emitted lifecycle events (`response.created`,
+   * `response.in_progress`, `response.completed`, `response.failed`) because
+   * the `StreamResponse` wrapper in the SDK client emits its own with the
+   * SDK-side id and conversation. Items + usage are accumulated from
+   * `response.output_item.done` and `response.completed`.
+   */
+  private async *streamViaResponses(
+    ctx: AgentRunContext,
+  ): AsyncGenerator<StreamEvent, AgentRunResult> {
+    if (!this.deps.backend.respondStream) {
+      throw new Error(
+        `Backend "${this.deps.backend.name}" declares mode "responses" but does not implement respondStream().`,
+      );
+    }
+    const upstreamReq = buildResponsesPassthrough(ctx, true);
+    const items: OutputItem[] = [];
+    let usage: Usage | null = null;
+    let seq = 0;
+
+    for await (const ev of this.deps.backend.respondStream(
+      upstreamReq,
+      ctx.signal,
+    )) {
+      if (ev.type === "response.completed") {
+        if (ev.response.output?.length) {
+          items.splice(0, items.length, ...ev.response.output);
+        }
+        if (ev.response.usage) usage = ev.response.usage;
+        continue;
+      }
+      if (ev.type === "response.failed") {
+        throw new Error(
+          `Upstream /responses failed: ${ev.response.error?.message ?? "unknown"}`,
+        );
+      }
+      if (
+        ev.type === "response.created" ||
+        ev.type === "response.in_progress"
+      ) {
+        continue;
+      }
+      if (ev.type === "response.output_item.done") {
+        items.push(ev.item);
+      }
+      yield { ...ev, sequence_number: seq++ };
+    }
+    return { items, usage };
   }
 
   // --- helpers ---
@@ -509,17 +606,17 @@ function assistantToolCallMessage(
 function extractEncryptedReasoning(
   items: OutputItem[],
 ): ReasoningDetail[] | null {
+  const all: ReasoningDetail[] = [];
   for (const item of items) {
-    if (item.type === "reasoning") {
-      const r = item as import("./types/responses.js").ReasoningItem;
-      if (r.encrypted_content) {
-        try {
-          return JSON.parse(r.encrypted_content) as ReasoningDetail[];
-        } catch {}
-      }
-    }
+    if (item.type !== "reasoning") continue;
+    const r = item as import("./types/responses.js").ReasoningItem;
+    if (!r.encrypted_content) continue;
+    try {
+      const parsed = JSON.parse(r.encrypted_content);
+      if (Array.isArray(parsed)) all.push(...(parsed as ReasoningDetail[]));
+    } catch {}
   }
-  return null;
+  return all.length > 0 ? all : null;
 }
 
 function removeFunctionCall(items: OutputItem[], callId: string): void {
@@ -571,6 +668,31 @@ function snapshotResponseFor(
     user: r.user ?? null,
     metadata: r.metadata ?? null,
   };
+}
+
+function buildResponsesPassthrough(
+  ctx: AgentRunContext,
+  stream: boolean,
+): CreateResponseRequest {
+  const inputItems = combineHistoryAndInput(ctx.history, ctx.request.input);
+  const { conversation: _c, previous_response_id: _p, store: _s, stream: _st, ...rest } =
+    ctx.request;
+  return { ...rest, input: inputItems, stream };
+}
+
+function combineHistoryAndInput(
+  history: ConversationItem[],
+  input: string | InputItem[] | undefined,
+): InputItem[] {
+  const out: InputItem[] = [...(history as InputItem[])];
+  if (input !== undefined) {
+    if (typeof input === "string") {
+      out.push({ type: "message", role: "user", content: input });
+    } else {
+      out.push(...input);
+    }
+  }
+  return out;
 }
 
 /**

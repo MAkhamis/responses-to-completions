@@ -1,23 +1,12 @@
 # responses-to-completions
 
-A drop-in proxy that exposes the **OpenAI Responses API** on top of any
+An **SDK** that exposes the OpenAI **Responses API** on top of any
 OpenAI-compatible `/v1/chat/completions` backend (vLLM, Ollama, llama.cpp,
 TGI, LiteLLM, Together, Groq, OpenRouter, …).
 
-Point your client at this server instead of `api.openai.com` and it will:
-
-- Accept `POST /v1/responses` requests in Responses-API shape.
-- Translate them to chat-completions calls against your backend.
-- Persist **conversations and responses** to a pluggable **Store** (local file or S3).
-- Execute **MCP tools** server-side on the model's behalf.
-- Stream back proper **Responses-API SSE events** (`response.created`, `response.output_text.delta`, `response.output_item.done`, `response.completed`, …).
-
-## Why
-
-The Responses API unifies conversation state, tool execution, and streaming
-into a single server-managed primitive. Open-source and self-hosted models
-only speak the older Chat Completions protocol. This package bridges the gap
-so you can migrate by changing one URL.
+Construct a `ResponsesClient`, give it a backend, and call
+`client.responses.create(...)` — the client handles conversation state, MCP
+tool execution, and streaming-event translation internally.
 
 ## Install
 
@@ -25,157 +14,180 @@ so you can migrate by changing one URL.
 npm i responses-to-completions
 ```
 
-## Quick start — run as a server
-
-```bash
-BACKEND_BASE_URL=http://localhost:8000/v1 \
-STORE_LOCAL_ROOT=./.data \
-npx responses-to-completions
-```
-
-Point the OpenAI SDK at it:
+## Quick start
 
 ```ts
-import OpenAI from "openai";
+import {
+  ResponsesClient,
+  OpenAICompatAdapter,
+  LocalFileStore,
+} from "responses-to-completions";
 
-const client = new OpenAI({
-  baseURL: "http://localhost:8787/v1",
-  apiKey: "not-used-but-required",
+const client = new ResponsesClient({
+  backend: new OpenAICompatAdapter({
+    baseUrl: "https://api.openai.com/v1",
+    apiKey: process.env.OPENAI_API_KEY,
+  }),
+  // optional — required for conversations and responses.{get,del}
+  store: new LocalFileStore("./.data"),
 });
 
 const resp = await client.responses.create({
-  model: "qwen2.5-coder:32b",
+  model: "gpt-4o-mini",
   input: "Write a haiku about TypeScript.",
 });
 console.log(resp.output_text);
 ```
 
-Streaming:
+### Streaming
+
+`responses.create({ stream: true })` returns a `StreamResponse` — an
+async-iterable of `StreamEvent`s plus a `finalResponse()` promise.
 
 ```ts
 const stream = await client.responses.create({
-  model: "qwen2.5-coder:32b",
-  input: "Tell me a story",
+  model: "gpt-4o-mini",
+  input: "Tell me a story.",
   stream: true,
 });
-for await (const event of stream) {
-  if (event.type === "response.output_text.delta") process.stdout.write(event.delta);
+
+for await (const ev of stream) {
+  if (ev.type === "response.output_text.delta") {
+    process.stdout.write(ev.delta);
+  }
 }
+
+const finalResp = await stream.finalResponse();
+console.log("\nfinal id:", finalResp.id);
 ```
 
 ## Backends
 
-### OpenAI-compatible (default)
+The constructor takes any `BackendAdapter`. Three are built in.
 
-Works with any server implementing `POST /v1/chat/completions` — including
-Ollama's own `/v1/chat/completions` OpenAI-compat endpoint (port 11434).
+### `OpenAICompatAdapter`
 
-```bash
-BACKEND=openai-compat
-BACKEND_BASE_URL=http://localhost:8000/v1
-BACKEND_API_KEY=optional-bearer
+Works with any server implementing `POST /v1/chat/completions` — OpenAI,
+vLLM, llama.cpp server, TGI, LiteLLM, Together, Groq, and Ollama's own
+OpenAI-compat endpoint on port 11434.
+
+```ts
+new OpenAICompatAdapter({
+  baseUrl: "http://localhost:8000/v1",
+  apiKey: "optional-bearer",
+  forceModel: "qwen2.5-coder:32b", // optional override
+});
 ```
 
-### Ollama (native `/api/chat`)
+### `OllamaAdapter`
 
-Normalizes Ollama-specific differences (NDJSON streaming, tool arguments as
-objects, no `developer` role):
+Native Ollama `/api/chat`. Normalizes NDJSON streaming, object-shaped tool
+arguments, and the missing `developer` role.
 
-```bash
-BACKEND=ollama
-OLLAMA_HOST=http://localhost:11434
+```ts
+new OllamaAdapter({ host: "http://localhost:11434" });
 ```
 
-Both adapters accept `FORCE_MODEL=...` to override the client's requested
-model on every upstream call — useful when your backend serves only one model.
+### `OpenRouterAdapter`
 
-## Stores (conversation persistence)
+OpenRouter with provider-routing preferences.
 
-State is persisted to a **Store**, a pluggable interface (`Store`) with two
-built-in implementations.
-
-### Local file
-
-```bash
-STORE=local
-STORE_LOCAL_ROOT=./.data
+```ts
+new OpenRouterAdapter({
+  apiKey: process.env.OPENROUTER_API_KEY!,
+  provider: { order: ["Anthropic", "Google"], allow_fallbacks: true },
+});
 ```
 
-Writes one JSON file per conversation and per response under:
+### Custom backends
+
+Implement the `BackendAdapter` interface (`complete` + `stream`).
+
+## Stores
+
+Persistence is optional. Without a store the client still runs requests
+but `conversations.*` and `responses.{get,del}` throw, and
+`responses.create` skips writing.
+
+### `LocalFileStore` — for local development / tests
+
+```ts
+new LocalFileStore("./.data");
+```
+
+Writes one JSON file per artifact:
 
 ```
 <root>/conversations/<id>.json
 <root>/responses/<id>.json
 ```
 
-### S3
+### `S3Store` — for production
 
-```bash
-STORE=s3
-STORE_S3_BUCKET=my-bucket
-STORE_S3_PREFIX=prod/responses
-STORE_S3_REGION=us-east-1
-# Standard AWS SDK credentials resolution applies.
+```ts
+new S3Store({
+  bucket: "my-bucket",
+  prefix: "prod/responses",
+  clientConfig: { region: "us-east-1" },
+});
 ```
 
 ### Custom stores
 
-Implement the `Store` interface and pass it when constructing the server
-programmatically:
+Implement the `Store` interface — see `src/store/store.ts`.
+
+## Conversations
+
+Conversation state is owned by the store. The client offers a thin facade:
 
 ```ts
-import { createServer, OpenAICompatAdapter, type Store } from "responses-to-completions";
+const conv = await client.conversations.create({ metadata: { user: "u_42" } });
 
-const store: Store = /* your Mongo / Postgres / Redis / DynamoDB impl */;
-const app = createServer({
-  backend: new OpenAICompatAdapter({ baseUrl: "https://api.openai.com/v1", apiKey: process.env.OPENAI_API_KEY }),
-  store,
-});
-app.listen(8787);
-```
-
-## Conversations API
-
-All conversation endpoints are implemented:
-
-| Method | Path | Description |
-| --- | --- | --- |
-| `POST` | `/v1/conversations` | Create a conversation with optional initial `items` |
-| `GET` | `/v1/conversations/:id` | Retrieve metadata |
-| `POST` | `/v1/conversations/:id` | Update metadata |
-| `DELETE` | `/v1/conversations/:id` | Delete a conversation |
-| `GET` | `/v1/conversations/:id/items` | List items (`limit`, `after`, `order`) |
-| `POST` | `/v1/conversations/:id/items` | Append items |
-| `GET` | `/v1/conversations/:id/items/:itemId` | Get a single item |
-| `DELETE` | `/v1/conversations/:id/items/:itemId` | Delete an item |
-
-Items are stored canonically as typed Responses-API items
-(`message`, `function_call`, `function_call_output`, `mcp_list_tools`,
-`mcp_call`, `mcp_approval_request`, `reasoning`) and rehydrated into a
-chat-completions `messages[]` view before each upstream call.
-
-Pass a conversation to `/v1/responses` to continue it:
-
-```ts
 await client.responses.create({
-  model: "llama3.1:70b",
-  conversation: "conv_abc123",     // server auto-creates if missing
-  input: "What did I just ask?",
+  model: "gpt-4o-mini",
+  conversation: conv.id,
+  input: "Remember the secret word 'banana'.",
 });
+await client.responses.create({
+  model: "gpt-4o-mini",
+  conversation: conv.id,
+  input: "What was the secret word?",
+});
+
+const { data } = await client.conversations.items.list(conv.id);
 ```
 
-Or chain with `previous_response_id`, same as OpenAI.
+Full surface:
+
+| Method | Notes |
+| --- | --- |
+| `conversations.create({ id?, items?, metadata? })` | `id` is optional; client-generated when omitted |
+| `conversations.get(id)` | Returns metadata only (items via `items.list`) |
+| `conversations.update(id, { metadata })` | |
+| `conversations.del(id)` | |
+| `conversations.items.list(id, { limit?, after?, order? })` | Paginated |
+| `conversations.items.append(id, items)` | Returns the full item list after append |
+| `conversations.items.get(id, itemId)` | |
+| `conversations.items.del(id, itemId)` | |
+
+Items are stored canonically as typed Responses-API items (`message`,
+`function_call`, `function_call_output`, `mcp_list_tools`, `mcp_call`,
+`mcp_approval_request`, `reasoning`) and rehydrated into a chat-completions
+`messages[]` view before each upstream call.
+
+You can also continue a conversation by `previous_response_id`, same as
+OpenAI.
 
 ## MCP tools
 
 Remote MCP servers are supported via the standard Responses-API `tools`
-entry (`type: "mcp"`). The proxy connects to each MCP server at request
+entry (`type: "mcp"`). The client connects to each MCP server at request
 time, lists its tools, exposes them to the backend model as function tools,
-and executes any tool calls server-side — mirroring OpenAI's behavior.
+and executes any tool calls server-side.
 
 ```ts
 await client.responses.create({
-  model: "llama3.1:70b",
+  model: "gpt-4o-mini",
   tools: [
     {
       type: "mcp",
@@ -192,18 +204,18 @@ await client.responses.create({
 
 The response surface includes:
 
-- `mcp_list_tools` items — the set of tools discovered on each server
-- `mcp_call` items — each executed tool call with its output
-- `mcp_approval_request` items — when `require_approval` demands one
+- `mcp_list_tools` items — the tools discovered on each server.
+- `mcp_call` items — each executed tool call with its output.
+- `mcp_approval_request` items — when `require_approval` demands one.
 
-To approve a paused call, send a follow-up request with an
+To approve a paused call, send a follow-up `responses.create` with an
 `mcp_approval_response` input item and `previous_response_id`.
 
 ### `require_approval`
 
 Supports the full OpenAI shape:
 
-- `"never"` — execute all tools immediately (default in this package).
+- `"never"` — execute all tools immediately.
 - `"always"` — emit an `mcp_approval_request` for every call.
 - `{ always: { tool_names: [...] }, never: { tool_names: [...] } }` — per-tool.
 
@@ -211,61 +223,54 @@ Supports the full OpenAI shape:
 
 - OpenAI **connectors** (`connector_id`) — only raw `server_url` MCP servers.
 - Built-in tools `web_search`, `file_search`, `code_interpreter`,
-  `computer_use`, `image_generation` — out of scope for v1. Requests including
-  them will fail at the backend since we forward them as-is without translation.
+  `computer_use`, `image_generation`. Requests including them will fail at
+  the backend since we forward them as-is.
 
-## Library usage
+## Configuration reference
 
-If you'd rather wire routes into your own Express app:
+All configuration is via constructor options — the library reads no
+environment variables.
 
-```ts
-import express from "express";
-import {
-  mountRoutes,
-  OpenAICompatAdapter,
-  LocalFileStore,
-} from "responses-to-completions";
+`new ResponsesClient(options)`:
 
-const app = express();
-app.use(express.json());
+| Option | Default | Description |
+| --- | --- | --- |
+| `backend` | — (required) | A `BackendAdapter` instance |
+| `store` | `undefined` | A `Store` instance — required for conversations and `responses.{get,del}` |
+| `maxIterations` | `10` | Hard cap on backend round-trips per request |
 
-mountRoutes(app, {
-  backend: new OpenAICompatAdapter({ baseUrl: "http://localhost:8000/v1" }),
-  store: new LocalFileStore("./.data"),
-});
+## Advanced usage
 
-app.listen(8787);
-```
-
-Or skip routing entirely and drive the translator yourself:
+You can bypass the client and drive `AgentLoop` directly:
 
 ```ts
 import { AgentLoop, OpenAICompatAdapter } from "responses-to-completions";
 
-const agent = new AgentLoop({ backend: new OpenAICompatAdapter({ baseUrl: "..." }) });
+const agent = new AgentLoop({
+  backend: new OpenAICompatAdapter({ baseUrl: "..." }),
+});
 const result = await agent.run({
   request: { model: "gpt-4o-mini", input: "hi" },
   history: [],
 });
 ```
 
-## Configuration reference
+The translators (`itemsToMessages`, `completionToOutputItems`,
+`translateChunkStream`) and the `resolveHistory` helper are also exported
+for custom orchestration.
 
-| Env var | Default | Description |
-| --- | --- | --- |
-| `PORT` | `8787` | HTTP port |
-| `HOST` | `0.0.0.0` | Bind address |
-| `BACKEND` | `openai-compat` | `openai-compat` or `ollama` |
-| `BACKEND_BASE_URL` | — | Base URL for openai-compat (e.g. `https://api.openai.com/v1`) |
-| `BACKEND_API_KEY` | — | Bearer token for the backend |
-| `OLLAMA_HOST` | `http://localhost:11434` | Ollama host |
-| `FORCE_MODEL` | — | Override client's model on every upstream call |
-| `STORE` | `local` | `local` or `s3` |
-| `STORE_LOCAL_ROOT` | `./.data` | Directory for local store |
-| `STORE_S3_BUCKET` | — | S3 bucket for S3 store |
-| `STORE_S3_PREFIX` | — | S3 key prefix |
-| `STORE_S3_REGION` | — | S3 region (falls back to AWS SDK default chain) |
-| `MAX_ITERATIONS` | `10` | Max agent-loop turns per request |
+## Running the SDK smoke test
+
+```bash
+tsx examples/sdk-test.ts \
+  --backend openai-compat \
+  --base-url https://api.openai.com/v1 \
+  --api-key "$OPENAI_API_KEY" \
+  --model gpt-4o-mini \
+  --store-local ./.test-data
+```
+
+Without `--store-local`, conversation/persistence tests are skipped.
 
 ## Design notes
 
@@ -277,7 +282,8 @@ const result = await agent.run({
 - **Streaming is synthesized.** Each `chat.completion.chunk` is mapped
   into the correct Responses-API event sequence; multi-turn tool loops
   serialize per iteration (stream deltas → execute tools → stream next).
-- **No hidden writes.** Setting `store: false` on a request skips persistence.
+- **No hidden writes.** Setting `store: false` on a request skips
+  persistence; constructing without a `store` skips it for every request.
 
 ## License
 
