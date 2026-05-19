@@ -4,6 +4,10 @@ import type {
   ChatCompletionResponse,
 } from "../types/completions.js";
 import type {
+  EmbeddingsRequest,
+  EmbeddingsResponse,
+} from "../types/embeddings.js";
+import type {
   CreateResponseRequest,
   ResponseObject,
 } from "../types/responses.js";
@@ -52,4 +56,9 @@ export interface BackendAdapter {
     req: CreateResponseRequest,
     signal?: AbortSignal,
   ): AsyncIterable<StreamEvent>;
+
+  embeddings?(
+    req: EmbeddingsRequest,
+    signal?: AbortSignal,
+  ): Promise<EmbeddingsResponse>;
 }
