@@ -103,6 +103,76 @@ new OpenRouterAdapter({
 
 Implement the `BackendAdapter` interface (`complete` + `stream`).
 
+## Embeddings
+
+All three built-in adapters expose an optional `embeddings()` method that
+returns the OpenAI-shaped `EmbeddingsResponse` regardless of provider.
+Call it directly on the adapter — embeddings are independent of the
+`ResponsesClient` surface.
+
+```ts
+import {
+  OpenAICompatAdapter,
+  OllamaAdapter,
+  OpenRouterAdapter,
+} from "responses-to-completions";
+
+// OpenAI / vLLM / any /v1/embeddings-compatible server
+const openai = new OpenAICompatAdapter({
+  baseUrl: "https://api.openai.com/v1",
+  apiKey: process.env.OPENAI_API_KEY,
+});
+const r1 = await openai.embeddings({
+  model: "text-embedding-3-small",
+  input: "hello world",
+});
+
+// Ollama — POST /api/embed, translated to the OpenAI shape
+const ollama = new OllamaAdapter({ host: "http://localhost:11434" });
+const r2 = await ollama.embeddings({
+  model: "nomic-embed-text",
+  input: ["a", "b", "c"],
+});
+
+// OpenRouter — routes to whichever provider exposes the model's embeddings
+const openrouter = new OpenRouterAdapter({
+  apiKey: process.env.OPENROUTER_API_KEY!,
+});
+const r3 = await openrouter.embeddings({
+  model: "openai/text-embedding-3-large",
+  input: "hi",
+});
+
+// All three return the same shape:
+//   { object: "list", data: [{ object: "embedding", index, embedding }], model, usage }
+```
+
+### Request shape
+
+```ts
+interface EmbeddingsRequest {
+  model: string;                        // honors `forceModel` on the adapter
+  input: string | string[];             // batch by passing an array
+  encoding_format?: "float" | "base64"; // default "float"; Ollama ignores
+  dimensions?: number;                  // text-embedding-3-* only; others ignore
+  user?: string;
+}
+```
+
+### Adapter-specific notes
+
+- **`OpenAICompatAdapter`** — pass-through to `POST {baseUrl}/embeddings`.
+  Reuses the same auth/headers/`forceModel` as `complete()`.
+- **`OpenRouterAdapter`** — same path, plus OpenRouter's `provider` routing
+  preferences are forwarded. Note that OpenRouter's embeddings coverage is
+  narrower than its chat coverage; only models exposing an embeddings
+  endpoint will work.
+- **`OllamaAdapter`** — calls native `POST /api/embed` and translates the
+  response to the OpenAI shape. `encoding_format`, `dimensions`, and `user`
+  are silently dropped (Ollama doesn't honor them).
+
+Non-2xx responses throw `BackendError` (same as `complete()`/`respond()`).
+
 ## Stores
 
 Persistence is optional. Without a store the client still runs requests

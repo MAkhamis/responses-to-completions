@@ -4,6 +4,10 @@ import type {
   ChatCompletionResponse,
 } from "../types/completions.js";
 import type {
+  EmbeddingsRequest,
+  EmbeddingsResponse,
+} from "../types/embeddings.js";
+import type {
   CreateResponseRequest,
   ResponseObject,
 } from "../types/responses.js";
@@ -141,6 +145,23 @@ export class OpenAICompatAdapter implements BackendAdapter {
     for await (const ev of parseSSE<StreamEvent>(res.body)) {
       yield ev;
     }
+  }
+
+  async embeddings(
+    req: EmbeddingsRequest,
+    signal?: AbortSignal,
+  ): Promise<EmbeddingsResponse> {
+    const res = await this.fetch(`${this.baseUrl}/embeddings`, {
+      method: "POST",
+      headers: this.headers(),
+      body: JSON.stringify(this.prepare(req)),
+      signal,
+    });
+    if (!res.ok) {
+      const body = await res.text();
+      throw new BackendError(res.status, body);
+    }
+    return (await res.json()) as EmbeddingsResponse;
   }
 }
 

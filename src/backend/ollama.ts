@@ -5,6 +5,10 @@ import type {
   ChatCompletionResponse,
   ChatToolCall,
 } from "../types/completions.js";
+import type {
+  EmbeddingsRequest,
+  EmbeddingsResponse,
+} from "../types/embeddings.js";
 import type { BackendAdapter } from "./adapter.js";
 import { BackendError } from "./openai-compat.js";
 
@@ -189,6 +193,57 @@ export class OllamaAdapter implements BackendAdapter {
       if (ev.done) return;
     }
   }
+  
+  async embeddings(
+    req: EmbeddingsRequest,
+    signal?: AbortSignal,
+  ): Promise<EmbeddingsResponse> {
+    const model = this.opts.forceModel ?? req.model;
+    const input = req.input;
+    if (!isOllamaCompatibleInput(input)) {
+      throw new Error(
+        "OllamaAdapter.embeddings: `input` must be a string or string[]; token-array inputs are not supported by Ollama.",
+      );
+    }
+    const res = await this.fetch(`${this.host}/api/embed`, {
+      method: "POST",
+      headers: this.headers(),
+      body: JSON.stringify({ model, input }),
+      signal,
+    });
+    if (!res.ok) throw new BackendError(res.status, await res.text());
+    const body = (await res.json()) as OllamaEmbedResponse;
+    const vectors = body.embeddings ?? [];
+    return {
+      object: "list",
+      data: vectors.map((vec, index) => ({
+        object: "embedding",
+        index,
+        embedding: vec,
+      })),
+      model: body.model ?? model,
+      usage: {
+        prompt_tokens: body.prompt_eval_count ?? 0,
+        total_tokens: body.prompt_eval_count ?? 0,
+      },
+    };
+  }
+}
+
+interface OllamaEmbedResponse {
+  model?: string;
+  embeddings?: number[][];
+  prompt_eval_count?: number;
+  total_duration?: number;
+  load_duration?: number;
+}
+
+function isOllamaCompatibleInput(
+  input: EmbeddingsRequest["input"],
+): input is string | string[] {
+  if (typeof input === "string") return true;
+  if (!Array.isArray(input)) return false;
+  return input.every((x) => typeof x === "string");
 }
 
 // ---- Ollama wire types ----
