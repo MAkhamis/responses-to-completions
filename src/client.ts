@@ -4,6 +4,10 @@ import { resolveHistory } from "./history.js";
 import type { ConversationItem, Store } from "./store/store.js";
 import type { StreamEvent } from "./translate/stream.js";
 import type {
+  EmbeddingsRequest,
+  EmbeddingsResponse,
+} from "./types/embeddings.js";
+import type {
   ConversationObject,
   CreateResponseRequest,
   OutputItem,
@@ -54,6 +58,12 @@ export class ResponsesClient {
     del(
       id: string,
     ): Promise<{ id: string; object: "response.deleted"; deleted: boolean }>;
+  };
+
+  readonly embeddings: {
+    create(
+      req: EmbeddingsRequest & { signal?: AbortSignal },
+    ): Promise<EmbeddingsResponse>;
   };
 
   readonly conversations: {
@@ -128,6 +138,23 @@ export class ResponsesClient {
       del: async (id) => {
         const r = await requireStore("responses.del").deleteResponse(id);
         return { id: r.id, object: "response.deleted", deleted: r.deleted };
+      },
+    };
+
+    this.embeddings = {
+      create: async (req) => {
+        if (!this.backend) {
+          throw new Error(
+            "ResponsesClient: `embeddings.create` requires a `backend`. Pass `backend` when constructing the client.",
+          );
+        }
+        if (!this.backend.embeddings) {
+          throw new Error(
+            `ResponsesClient: backend "${this.backend.name}" does not support embeddings.`,
+          );
+        }
+        const { signal, ...body } = req;
+        return this.backend.embeddings(body, signal);
       },
     };
 
