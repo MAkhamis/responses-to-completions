@@ -105,47 +105,61 @@ Implement the `BackendAdapter` interface (`complete` + `stream`).
 
 ## Embeddings
 
-All three built-in adapters expose an optional `embeddings()` method that
-returns the OpenAI-shaped `EmbeddingsResponse` regardless of provider.
-Call it directly on the adapter — embeddings are independent of the
-`ResponsesClient` surface.
+Call `client.embeddings.create(...)` to produce embeddings. The client
+delegates to the configured backend adapter and returns the OpenAI-shaped
+`EmbeddingsResponse` regardless of provider.
 
 ```ts
 import {
+  ResponsesClient,
   OpenAICompatAdapter,
+} from "responses-to-completions";
+
+const client = new ResponsesClient({
+  backend: new OpenAICompatAdapter({
+    baseUrl: "https://api.openai.com/v1",
+    apiKey: process.env.OPENAI_API_KEY,
+  }),
+});
+
+const resp = await client.embeddings.create({
+  model: "text-embedding-3-large",
+  input: "hi",
+});
+// { object: "list", data: [{ object: "embedding", index, embedding }], model, usage }
+```
+
+Works with any built-in adapter — swap in `OllamaAdapter` or
+`OpenRouterAdapter` and the call site stays the same:
+
+```ts
+import {
+  ResponsesClient,
   OllamaAdapter,
   OpenRouterAdapter,
 } from "responses-to-completions";
 
-// OpenAI / vLLM / any /v1/embeddings-compatible server
-const openai = new OpenAICompatAdapter({
-  baseUrl: "https://api.openai.com/v1",
-  apiKey: process.env.OPENAI_API_KEY,
-});
-const r1 = await openai.embeddings({
-  model: "text-embedding-3-small",
-  input: "hello world",
-});
-
 // Ollama — POST /api/embed, translated to the OpenAI shape
-const ollama = new OllamaAdapter({ host: "http://localhost:11434" });
-const r2 = await ollama.embeddings({
+const ollamaClient = new ResponsesClient({
+  backend: new OllamaAdapter({ host: "http://localhost:11434" }),
+});
+await ollamaClient.embeddings.create({
   model: "nomic-embed-text",
   input: ["a", "b", "c"],
 });
 
 // OpenRouter — routes to whichever provider exposes the model's embeddings
-const openrouter = new OpenRouterAdapter({
-  apiKey: process.env.OPENROUTER_API_KEY!,
+const orClient = new ResponsesClient({
+  backend: new OpenRouterAdapter({ apiKey: process.env.OPENROUTER_API_KEY! }),
 });
-const r3 = await openrouter.embeddings({
+await orClient.embeddings.create({
   model: "openai/text-embedding-3-large",
-  input: "hi",
+  input: ["a", "b", "c"],
 });
-
-// All three return the same shape:
-//   { object: "list", data: [{ object: "embedding", index, embedding }], model, usage }
 ```
+
+Embeddings don't require a `store` — only a `backend`. If the configured
+backend doesn't implement `embeddings()`, the call throws.
 
 ### Request shape
 
