@@ -1,6 +1,6 @@
 {
   "name": "responses-to-completions",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "SDK that exposes the OpenAI Responses API on top of any /v1/chat/completions backend (vLLM, Ollama, llama.cpp, TGI, etc.). Handles conversation state, MCP tool execution, and streaming event translation.",
   "keywords": [
     "openai",
