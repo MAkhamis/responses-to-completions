@@ -19,7 +19,10 @@ import { genFcId, genMessageId, genReasoningId } from "../util/ids.js";
  *
  * Refusals and reasoning traces are propagated when present.
  */
-export function completionToOutputItems(resp: ChatCompletionResponse): {
+export function completionToOutputItems(
+  resp: ChatCompletionResponse,
+  requestModel?: string,
+): {
   items: OutputItem[];
   outputText: string;
 } {
@@ -49,7 +52,10 @@ export function completionToOutputItems(resp: ChatCompletionResponse): {
         ? [{ type: "reasoning_text", text: reasoningText }]
         : [],
       ...(encryptedBlobs.length > 0
-        ? { encrypted_content: JSON.stringify(encryptedBlobs) }
+        ? {
+            encrypted_content: JSON.stringify(encryptedBlobs),
+            model: requestModel ?? resp.model,
+          }
         : {}),
     };
     items.push(reasoning);
@@ -113,6 +119,8 @@ export function translateUsage(u?: ChatCompletionUsage): Usage | null {
     input_tokens: u.prompt_tokens,
     output_tokens: u.completion_tokens,
     total_tokens: u.total_tokens,
+    ...(typeof u.cost === "number" ? { cost: u.cost } : {}),
+    ...(u.cost_details ? { cost_details: u.cost_details } : {}),
     ...(u.prompt_tokens_details
       ? {
           input_tokens_details: {

@@ -3,6 +3,7 @@ import type {
   ChatMessage,
   ChatToolCall,
   ChatToolChoice,
+  CompletionsContentPart,
   ReasoningDetail,
 } from "../types/completions.js";
 import type {
@@ -43,6 +44,7 @@ export function itemsToMessages(
   history: ConversationItem[],
   newInput: string | InputItem[] | undefined,
   instructions: string | undefined,
+  model?: string,
 ): ChatMessage[] {
   const msgs: ChatMessage[] = [];
 
@@ -54,7 +56,7 @@ export function itemsToMessages(
 
   let pendingEncrypted: ReasoningDetail[] | null = null;
   for (const item of all) {
-    pendingEncrypted = pushItem(msgs, item, pendingEncrypted);
+    pendingEncrypted = pushItem(msgs, item, pendingEncrypted, model);
   }
   return msgs;
 }
@@ -71,12 +73,13 @@ function pushItem(
   msgs: ChatMessage[],
   item: ConversationItem,
   pendingEncrypted: ReasoningDetail[] | null,
+  model?: string,
 ): ReasoningDetail[] | null {
   const t = (item as { type?: string }).type;
 
   if (t === "reasoning") {
     const r = item as ReasoningItem;
-    if (r.encrypted_content) {
+    if (r.encrypted_content && r.model && model && r.model === model) {
       try {
         return JSON.parse(r.encrypted_content) as ReasoningDetail[];
       } catch {}
@@ -87,13 +90,21 @@ function pushItem(
   // Message item (input or output).
   if (!t || t === "message") {
     const m = item as InputMessageItem;
-    const content = messageContentToText(m.content);
+    const content = messageContentToChatContent(m.content);
     const role = m.role === "developer" ? "system" : m.role;
     if (role === "tool") return pendingEncrypted; // handled via function_call_output
+    // Multimodal (image) parts are only valid on user messages in the
+    // chat-completions schema; flatten to text for other roles.
+    const safeContent =
+      typeof content === "string" || role === "user"
+        ? content
+        : content
+            .map((p) => (p.type === "text" ? p.text : ""))
+            .join("");
     const msg: ChatMessage = {
       role: role as "system" | "user" | "assistant",
-      content,
-    };
+      content: safeContent,
+    } as ChatMessage;
     if (role === "assistant" && pendingEncrypted) {
       (msg as { reasoning_details?: ReasoningDetail[] }).reasoning_details =
         pendingEncrypted;
@@ -147,22 +158,46 @@ function pushItem(
   return pendingEncrypted;
 }
 
-function messageContentToText(
+/**
+ * Text-only content flattens to a plain string; content with `input_image`
+ * parts becomes a chat-completions multimodal content array so images
+ * survive the translation (vision models).
+ */
+function messageContentToChatContent(
   content: InputMessageItem["content"] | OutputItem[],
-): string {
+): string | CompletionsContentPart[] {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return "";
-  return content
-    .map((c) => {
-      if (!c || typeof c !== "object") return "";
-      const type = (c as { type?: string }).type;
-      if (type === "input_text" || type === "output_text") {
-        return (c as { text?: string }).text ?? "";
+  const parts: CompletionsContentPart[] = [];
+  let hasImage = false;
+  for (const c of content) {
+    if (!c || typeof c !== "object") continue;
+    const type = (c as { type?: string }).type;
+    if (type === "input_text" || type === "output_text") {
+      parts.push({ type: "text", text: (c as { text?: string }).text ?? "" });
+    } else if (type === "refusal") {
+      parts.push({
+        type: "text",
+        text: (c as { refusal?: string }).refusal ?? "",
+      });
+    } else if (type === "input_image") {
+      const img = c as { image_url?: string; detail?: "auto" | "low" | "high" };
+      if (img.image_url) {
+        hasImage = true;
+        parts.push({
+          type: "image_url",
+          image_url: {
+            url: img.image_url,
+            ...(img.detail ? { detail: img.detail } : {}),
+          },
+        });
       }
-      if (type === "refusal") return (c as { refusal?: string }).refusal ?? "";
-      return "";
-    })
-    .join("");
+    }
+  }
+  if (!hasImage) {
+    return parts.map((p) => (p.type === "text" ? p.text : "")).join("");
+  }
+  return parts;
 }
 
 export function translateTools(

@@ -64,6 +64,15 @@ export interface OpenRouterAdapterOptions {
    *  - `"responses"`             → `POST {baseUrl}/responses`
    */
   endpoint?: "completions" | "responses";
+  /**
+   * OpenRouter usage accounting: injects `usage: { include: true }` into
+   * chat-completions requests so responses report the billed `usage.cost`
+   * (credits). Default true; set false to opt out (OpenRouter computes the
+   * cost before emitting the final chunk, which can add a small delay). An
+   * explicit `usage` field on a request always wins over this option.
+   * Applies to /chat/completions only — never to /responses or /embeddings.
+   */
+  usageAccounting?: boolean;
 }
 
 export class OpenRouterAdapter implements BackendAdapter {
@@ -100,6 +109,15 @@ export class OpenRouterAdapter implements BackendAdapter {
     };
   }
 
+  /** Usage-accounting opt-in for chat-completions bodies (see option docs). */
+  private usageBody(req: ChatCompletionRequest): {
+    usage?: { include?: boolean };
+  } {
+    return req.usage === undefined && this.opts.usageAccounting !== false
+      ? { usage: { include: true } }
+      : {};
+  }
+
   // ---- chat-completions endpoint ------------------------------------------
   async complete(
     req: ChatCompletionRequest,
@@ -108,7 +126,11 @@ export class OpenRouterAdapter implements BackendAdapter {
     const res = await this.fetch(`${this.baseUrl}/chat/completions`, {
       method: "POST",
       headers: this.headers(),
-      body: JSON.stringify({ ...this.prepare(req), stream: false }),
+      body: JSON.stringify({
+        ...this.prepare(req),
+        ...this.usageBody(req),
+        stream: false,
+      }),
       signal,
     });
     if (!res.ok) {
@@ -127,6 +149,7 @@ export class OpenRouterAdapter implements BackendAdapter {
       headers: this.headers({ accept: "text/event-stream" }),
       body: JSON.stringify({
         ...this.prepare(req),
+        ...this.usageBody(req),
         stream: true,
         stream_options: { include_usage: true, ...(req.stream_options ?? {}) },
       }),

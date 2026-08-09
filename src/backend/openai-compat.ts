@@ -29,6 +29,13 @@ export interface OpenAICompatAdapterOptions {
    *  - `"responses"`             → `POST {baseUrl}/responses`
    */
   endpoint?: "completions" | "responses";
+  /**
+   * Which token-limit key to send on chat-completions requests.
+   * api.openai.com rejects `max_tokens` for reasoning models (o-series,
+   * gpt-5*) and wants `max_completion_tokens`; most OSS servers only know
+   * `max_tokens`. Default `"max_tokens"`.
+   */
+  maxTokensParam?: "max_tokens" | "max_completion_tokens";
 }
 
 /**
@@ -65,8 +72,20 @@ export class OpenAICompatAdapter implements BackendAdapter {
   }
 
   private prepare<T extends { model: string }>(req: T): T {
-    if (this.opts.forceModel) return { ...req, model: this.opts.forceModel };
-    return req;
+    let out: T = this.opts.forceModel
+      ? { ...req, model: this.opts.forceModel }
+      : req;
+    const maxTokens = (out as { max_tokens?: number }).max_tokens;
+    if (
+      this.opts.maxTokensParam === "max_completion_tokens" &&
+      maxTokens !== undefined
+    ) {
+      const { max_tokens: _max_tokens, ...rest } = out as T & {
+        max_tokens?: number;
+      };
+      out = { ...rest, max_completion_tokens: maxTokens } as unknown as T;
+    }
+    return out;
   }
 
   // ---- chat-completions endpoint ------------------------------------------

@@ -312,6 +312,7 @@ export async function* translateChunkStream(
         ];
         if (encryptedBlobs.length > 0) {
           reasoningItem.encrypted_content = JSON.stringify(encryptedBlobs);
+          reasoningItem.model = initialResponse.model;
           encryptedBlobs.length = 0;
         }
         yield {
@@ -384,6 +385,8 @@ export async function* translateChunkStream(
 
   if (reasoningItem && encryptedBlobs.length > 0) {
     reasoningItem.encrypted_content = JSON.stringify(encryptedBlobs);
+    // Pin to the requested model — encrypted payloads only replay there.
+    reasoningItem.model = initialResponse.model;
   }
 
   // Assemble final items in output-index order.
