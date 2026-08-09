@@ -6,6 +6,7 @@ import type {
   ChatMessage,
   ChatToolCall,
   ReasoningDetail,
+  UsageCostDetails,
 } from "./types/completions.js";
 import type {
   CreateResponseRequest,
@@ -86,6 +87,7 @@ export class AgentLoop {
         ctx.history,
         ctx.request.input,
         ctx.request.instructions,
+        ctx.request.model,
       );
       let chatTools = [...clientFunctionTools, ...mcpSetup.chatTools];
 
@@ -99,7 +101,7 @@ export class AgentLoop {
         usage = mergeUsage(usage, translateUsage(resp.usage));
 
         const { items: newItems, outputText: _ } =
-          completionToOutputItems(resp);
+          completionToOutputItems(resp, ctx.request.model);
         producedItems.push(...newItems);
 
         const pendingFcs = newItems.filter(
@@ -206,6 +208,7 @@ export class AgentLoop {
         ctx.history,
         ctx.request.input,
         ctx.request.instructions,
+        ctx.request.model,
       );
       let chatTools = [...clientFunctionTools, ...mcpSetup.chatTools];
 
@@ -570,7 +573,8 @@ function buildChatRequest(
       const rf = translateResponseFormat(r.text);
       return rf ? { response_format: rf } : {};
     })(),
-    ...(r.reasoning ? { reasoning: r.reasoning } : {}),
+    ...(r.reasoning?.effort ? { reasoning_effort: r.reasoning.effort } : {}),
+    ...(r.service_tier !== undefined ? { service_tier: r.service_tier } : {}),
   };
 }
 
@@ -635,6 +639,38 @@ function mergeUsage(a: Usage | null, b: Usage | null): Usage | null {
     input_tokens: a.input_tokens + b.input_tokens,
     output_tokens: a.output_tokens + b.output_tokens,
     total_tokens: a.total_tokens + b.total_tokens,
+    ...(a.cost !== undefined || b.cost !== undefined
+      ? { cost: (a.cost ?? 0) + (b.cost ?? 0) }
+      : {}),
+    ...(a.cost_details || b.cost_details
+      ? { cost_details: mergeCostDetails(a.cost_details, b.cost_details) }
+      : {}),
+  };
+}
+
+function mergeCostDetails(
+  a?: UsageCostDetails,
+  b?: UsageCostDetails,
+): UsageCostDetails {
+  const sum = (x?: number | null, y?: number | null): number | undefined =>
+    x != null || y != null ? (x ?? 0) + (y ?? 0) : undefined;
+  const upstream = sum(a?.upstream_inference_cost, b?.upstream_inference_cost);
+  const prompt = sum(
+    a?.upstream_inference_prompt_cost,
+    b?.upstream_inference_prompt_cost,
+  );
+  const completions = sum(
+    a?.upstream_inference_completions_cost,
+    b?.upstream_inference_completions_cost,
+  );
+  return {
+    ...(upstream !== undefined ? { upstream_inference_cost: upstream } : {}),
+    ...(prompt !== undefined
+      ? { upstream_inference_prompt_cost: prompt }
+      : {}),
+    ...(completions !== undefined
+      ? { upstream_inference_completions_cost: completions }
+      : {}),
   };
 }
 
@@ -660,6 +696,7 @@ function snapshotResponseFor(
       typeof r.conversation === "string"
         ? { id: r.conversation }
         : (r.conversation ?? null),
+    service_tier: r.service_tier ?? null,
     temperature: r.temperature ?? null,
     tool_choice: r.tool_choice ?? "auto",
     tools: r.tools ?? [],
@@ -675,8 +712,14 @@ function buildResponsesPassthrough(
   stream: boolean,
 ): CreateResponseRequest {
   const inputItems = combineHistoryAndInput(ctx.history, ctx.request.input);
-  const { conversation: _c, previous_response_id: _p, store: _s, stream: _st, ...rest } =
-    ctx.request;
+  const {
+    conversation: _c,
+    previous_response_id: _p,
+    store: _s,
+    stream: _st,
+    signal: _sig,
+    ...rest
+  } = ctx.request as CreateResponseRequest & { signal?: AbortSignal };
   return { ...rest, input: inputItems, stream };
 }
 

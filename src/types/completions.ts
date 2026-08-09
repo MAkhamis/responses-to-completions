@@ -114,10 +114,13 @@ export interface ChatCompletionRequest {
   seed?: number;
   user?: string;
   metadata?: Record<string, string>;
+  reasoning_effort?: "minimal" | "low" | "medium" | "high";
+  service_tier?: "auto" | "default" | "flex" | "priority";
   reasoning?: {
     effort?: "minimal" | "low" | "medium" | "high";
     summary?: "auto" | "concise" | "detailed";
   };
+  usage?: { include?: boolean };
 }
 
 export interface ChatCompletionChoice {
@@ -133,12 +136,21 @@ export interface ChatCompletionChoice {
   logprobs?: unknown;
 }
 
+
+export interface UsageCostDetails {
+  upstream_inference_cost?: number | null;
+  upstream_inference_prompt_cost?: number | null;
+  upstream_inference_completions_cost?: number | null;
+}
+
 export interface ChatCompletionUsage {
   prompt_tokens: number;
   completion_tokens: number;
   total_tokens: number;
   prompt_tokens_details?: { cached_tokens?: number };
   completion_tokens_details?: { reasoning_tokens?: number };
+  cost?: number;
+  cost_details?: UsageCostDetails;
 }
 
 export interface ChatCompletionResponse {

@@ -7,6 +7,8 @@
  * for v1 (web_search, file_search, code_interpreter, computer_use, image_gen).
  */
 
+import type { UsageCostDetails } from "./completions.js";
+
 export type Role = "system" | "user" | "assistant" | "developer" | "tool";
 
 export interface InputTextContent {
@@ -93,6 +95,7 @@ export interface ReasoningItem {
   content?: Array<{ type: "reasoning_text"; text: string }>;
   encrypted_content?: string;
   status?: "in_progress" | "completed" | "incomplete";
+  model?: string;
 }
 
 /** Emitted when an MCP server is connected and its tools are listed. */
@@ -210,6 +213,7 @@ export interface CreateResponseRequest {
   max_tool_calls?: number;
   metadata?: Record<string, string>;
   reasoning?: { effort?: "minimal" | "low" | "medium" | "high"; summary?: "auto" | "concise" | "detailed" };
+  service_tier?: "auto" | "default" | "flex" | "priority";
   text?: { format?: ResponseTextFormat; verbosity?: "low" | "medium" | "high" };
   include?: string[];
   user?: string;
@@ -227,6 +231,8 @@ export interface Usage {
   output_tokens: number;
   output_tokens_details?: { reasoning_tokens?: number };
   total_tokens: number;
+  cost?: number;
+  cost_details?: UsageCostDetails;
 }
 
 export type ResponseStatus =
@@ -254,6 +260,7 @@ export interface ResponseObject {
   previous_response_id: string | null;
   conversation: { id: string } | null;
   reasoning?: { effort?: string | null; summary?: string | null };
+  service_tier?: string | null;
   temperature: number | null;
   tool_choice: ToolChoice;
   tools: ToolDef[];

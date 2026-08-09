@@ -498,6 +498,7 @@ function buildInitialResponse(
     parallel_tool_calls: body.parallel_tool_calls ?? true,
     previous_response_id: body.previous_response_id ?? null,
     conversation: conversationId ? { id: conversationId } : null,
+    service_tier: body.service_tier ?? null,
     temperature: body.temperature ?? null,
     tool_choice: body.tool_choice ?? "auto",
     tools: body.tools ?? [],
