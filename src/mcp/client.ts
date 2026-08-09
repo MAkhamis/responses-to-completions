@@ -1,9 +1,8 @@
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import type {
-  McpToolDef,
-  RequireApproval,
-} from "../types/responses.js";
+import {
+  Client,
+  StreamableHTTPClientTransport,
+} from "@modelcontextprotocol/client";
+import type { McpToolDef, RequireApproval } from "../types/responses.js";
 
 export interface McpToolInfo {
   name: string;
@@ -31,7 +30,10 @@ export class McpConnection {
       client ??
       new Client(
         { name: "responses-to-completions", version: "0.1.0" },
-        { capabilities: {} },
+        {
+          capabilities: {},
+          versionNegotiation: { mode: "auto" },
+        },
       );
   }
 
@@ -46,9 +48,12 @@ export class McpConnection {
     if (this.def.authorization) {
       headers["authorization"] = `Bearer ${this.def.authorization}`;
     }
-    const transport = new StreamableHTTPClientTransport(new URL(this.def.server_url), {
-      requestInit: { headers },
-    });
+    const transport = new StreamableHTTPClientTransport(
+      new URL(this.def.server_url),
+      {
+        requestInit: { headers },
+      },
+    );
     await this.client.connect(transport);
     this.connected = true;
   }
