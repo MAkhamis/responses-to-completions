@@ -198,6 +198,12 @@ export type ToolChoice =
 
 export interface CreateResponseRequest {
   model: string;
+  /**
+   * Names which entry of the client's `backends` map serves this request.
+   * Falls back to the default `backend` when absent or unmatched. SDK-only
+   * routing key — never forwarded upstream.
+   */
+  source?: string;
   input: string | InputItem[];
   instructions?: string;
   previous_response_id?: string;

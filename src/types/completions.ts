@@ -21,7 +21,24 @@ export interface ImageUrlContentPart {
   image_url: { url: string; detail?: "auto" | "low" | "high" };
 }
 
-export type CompletionsContentPart = TextContentPart | ImageUrlContentPart;
+/**
+ * Document attachment part. OpenAI accepts `file_id` or base64 `file_data`;
+ * OpenRouter's file-parser plugin additionally accepts a plain URL in
+ * `file_data`. Only valid on user messages.
+ */
+export interface FileContentPart {
+  type: "file";
+  file: {
+    filename?: string;
+    file_data?: string;
+    file_id?: string;
+  };
+}
+
+export type CompletionsContentPart =
+  | TextContentPart
+  | ImageUrlContentPart
+  | FileContentPart;
 
 export interface SystemMessage {
   role: "system" | "developer";
@@ -160,6 +177,9 @@ export interface ChatCompletionResponse {
   model: string;
   choices: ChatCompletionChoice[];
   usage?: ChatCompletionUsage;
+  // The tier that actually processed the request — may differ from the
+  // requested one (OpenAI downgrades priority past the ramp-rate limit).
+  service_tier?: string | null;
   system_fingerprint?: string;
 }
 
@@ -204,5 +224,7 @@ export interface ChatCompletionChunk {
   model: string;
   choices: ChatCompletionChunkChoice[];
   usage?: ChatCompletionUsage;
+  // See ChatCompletionResponse.service_tier — the served tier.
+  service_tier?: string | null;
   system_fingerprint?: string;
 }

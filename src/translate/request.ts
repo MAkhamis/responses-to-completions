@@ -160,8 +160,9 @@ function pushItem(
 
 /**
  * Text-only content flattens to a plain string; content with `input_image`
- * parts becomes a chat-completions multimodal content array so images
- * survive the translation (vision models).
+ * or `input_file` parts becomes a chat-completions multimodal content array
+ * so images (vision models) and documents (file-parsing backends) survive
+ * the translation.
  */
 function messageContentToChatContent(
   content: InputMessageItem["content"] | OutputItem[],
@@ -169,7 +170,7 @@ function messageContentToChatContent(
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return "";
   const parts: CompletionsContentPart[] = [];
-  let hasImage = false;
+  let hasNonText = false;
   for (const c of content) {
     if (!c || typeof c !== "object") continue;
     const type = (c as { type?: string }).type;
@@ -183,7 +184,7 @@ function messageContentToChatContent(
     } else if (type === "input_image") {
       const img = c as { image_url?: string; detail?: "auto" | "low" | "high" };
       if (img.image_url) {
-        hasImage = true;
+        hasNonText = true;
         parts.push({
           type: "image_url",
           image_url: {
@@ -192,9 +193,31 @@ function messageContentToChatContent(
           },
         });
       }
+    } else if (type === "input_file") {
+      const f = c as {
+        file_id?: string;
+        file_url?: string;
+        file_data?: string;
+        filename?: string;
+      };
+      // Chat-completions carries documents in `file.file_data` (base64 for
+      // OpenAI; OpenRouter's file-parser also accepts a plain URL) or by
+      // `file_id`. A part with neither has nothing to send — skip it.
+      const fileData = f.file_data ?? f.file_url;
+      if (fileData || f.file_id) {
+        hasNonText = true;
+        parts.push({
+          type: "file",
+          file: {
+            ...(f.filename ? { filename: f.filename } : {}),
+            ...(fileData ? { file_data: fileData } : {}),
+            ...(f.file_id ? { file_id: f.file_id } : {}),
+          },
+        });
+      }
     }
   }
-  if (!hasImage) {
+  if (!hasNonText) {
     return parts.map((p) => (p.type === "text" ? p.text : "")).join("");
   }
   return parts;
