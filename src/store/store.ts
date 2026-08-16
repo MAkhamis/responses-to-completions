@@ -20,6 +20,26 @@ export type ConversationItem = InputItem | OutputItem;
  * bucket, say) is not guaranteed and should be handled at the infra layer.
  */
 export interface Store {
+  /**
+   * True when this store does not persist responses itself: `saveResponse` is
+   * a no-op and `getResponse` reads through to the provider, so only ids the
+   * provider itself issued can be retrieved. Defaults to false — a store that
+   * writes responses to its own backing medium leaves it unset. Callers use it
+   * to explain an unresolvable `previous_response_id` instead of reporting a
+   * bare miss.
+   */
+  readonly readsResponsesThrough?: boolean;
+
+  /**
+   * True when conversation ids belong to the provider rather than to the
+   * caller: `createConversation` rejects a supplied `id`, so a conversation
+   * cannot be brought into existence under an id chosen here. Defaults to
+   * false — a store that owns its own keyspace leaves it unset. Callers use it
+   * to explain an unknown `conversation` id instead of attempting an
+   * auto-create that cannot succeed.
+   */
+  readonly assignsConversationIds?: boolean;
+
   // Conversations
   createConversation(input: {
     id?: string;

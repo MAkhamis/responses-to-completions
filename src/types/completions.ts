@@ -160,12 +160,28 @@ export interface UsageCostDetails {
   upstream_inference_completions_cost?: number | null;
 }
 
+export interface PromptTokensDetails {
+  cached_tokens?: number;
+  /**
+   * Prompt tokens written to the cache. Only reported on GPT-5.6 and later,
+   * where writes are billed at 1.25x the uncached input rate (earlier models
+   * cache for free and omit the field).
+   */
+  cache_write_tokens?: number;
+  [k: string]: number | undefined;
+}
+
+export interface CompletionTokensDetails {
+  reasoning_tokens?: number;
+  [k: string]: number | undefined;
+}
+
 export interface ChatCompletionUsage {
   prompt_tokens: number;
   completion_tokens: number;
   total_tokens: number;
-  prompt_tokens_details?: { cached_tokens?: number };
-  completion_tokens_details?: { reasoning_tokens?: number };
+  prompt_tokens_details?: PromptTokensDetails;
+  completion_tokens_details?: CompletionTokensDetails;
   cost?: number;
   cost_details?: UsageCostDetails;
 }

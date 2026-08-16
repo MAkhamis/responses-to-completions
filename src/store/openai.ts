@@ -1,0 +1,284 @@
+import type { ConversationObject, ResponseObject } from "../types/responses.js";
+import type { ConversationItem, Store } from "./store.js";
+
+export interface OpenAIConversationStoreOptions {
+  apiKey: string;
+  /** Base URL without a trailing endpoint. Defaults to the OpenAI API. */
+  baseUrl?: string;
+  headers?: Record<string, string>;
+  fetch?: typeof fetch;
+  /**
+   * Page size used when reading a whole conversation. `listItems` with no
+   * explicit limit pages until exhaustion, so this only tunes round-trips.
+   */
+  pageSize?: number;
+}
+
+export class OpenAIStoreError extends Error {
+  constructor(
+    public status: number,
+    public body: string,
+  ) {
+    super(`OpenAI conversations API error ${status}: ${body}`);
+    this.name = "OpenAIStoreError";
+  }
+}
+
+/**
+ * Store backed by OpenAI's Conversations API instead of local disk or S3 —
+ * conversation state lives in the provider's account, and `createConversation`
+ * returns the real `conv_…` id OpenAI issued.
+ *
+ * Use it only for traffic actually served by OpenAI: every read and write
+ * sends the conversation's content to api.openai.com, so pointing another
+ * provider's requests at this store would hand OpenAI their transcripts.
+ *
+ * Responses are the one asymmetry. OpenAI persists responses its own
+ * `/responses` endpoint created, so `saveResponse` is a no-op here and
+ * `getResponse` reads through to the provider. What resolves therefore
+ * depends on how the client reaches OpenAI:
+ *
+ * - `config.endpoint: "responses"` — the turn is served by OpenAI's own
+ *   `/responses`, the client adopts the id OpenAI issued for it, and
+ *   `previous_response_id` resolves on the read-through.
+ * - `config.endpoint: "completions"` (the default) — the `ResponseObject` is
+ *   synthesized here from a chat-completions turn and has no counterpart
+ *   upstream, so `previous_response_id` cannot resolve. Drive continuity with
+ *   `conversation`, which this store persists either way.
+ *
+ * One consequence of the no-op `saveResponse`: a response served by OpenAI
+ * carries no record of the SDK-side conversation it belonged to, so chaining
+ * by `previous_response_id` replays that turn's output rather than the whole
+ * conversation. Pass `conversation` when the full transcript matters.
+ */
+export class OpenAIConversationStore implements Store {
+  readonly name = "openai-conversations";
+  readonly readsResponsesThrough = true;
+  readonly assignsConversationIds = true;
+  private baseUrl: string;
+  private fetch: typeof fetch;
+  private pageSize: number;
+
+  constructor(private opts: OpenAIConversationStoreOptions) {
+    this.baseUrl = (opts.baseUrl ?? "https://api.openai.com/v1").replace(
+      /\/+$/,
+      "",
+    );
+    this.fetch = opts.fetch ?? fetch;
+    this.pageSize = opts.pageSize ?? 100;
+  }
+
+  private headers(): Record<string, string> {
+    return {
+      "Content-Type": "application/json",
+      ...(this.opts.apiKey
+        ? { Authorization: `Bearer ${this.opts.apiKey}` }
+        : {}),
+      ...this.opts.headers,
+    };
+  }
+
+  private async call<T>(
+    method: "GET" | "POST" | "DELETE",
+    path: string,
+    body?: unknown,
+    /** Treat 404 as "absent" and return null rather than throwing. */
+    nullOn404 = false,
+  ): Promise<T | null> {
+    const res = await this.fetch(`${this.baseUrl}${path}`, {
+      method,
+      headers: this.headers(),
+      ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+    });
+    if (!res.ok) {
+      if (nullOn404 && res.status === 404) return null;
+      throw new OpenAIStoreError(res.status, await res.text());
+    }
+    if (res.status === 204) return {} as T;
+    const text = await res.text();
+    if (!text.trim()) return {} as T;
+    return JSON.parse(text) as T;
+  }
+
+  // ---- conversations ----
+  async createConversation(input: {
+    id?: string;
+    metadata?: Record<string, string> | null;
+    items?: ConversationItem[];
+  }): Promise<ConversationObject> {
+    // OpenAI issues the id; a caller-supplied one cannot be honored, and
+    // silently returning a different id would strand the caller's reference.
+    if (input.id) {
+      throw new Error(
+        "OpenAIConversationStore: OpenAI assigns conversation ids — cannot create with a caller-supplied `id`.",
+      );
+    }
+    const created = await this.call<ConversationObject>(
+      "POST",
+      "/conversations",
+      {
+        ...(input.metadata ? { metadata: input.metadata } : {}),
+        ...(input.items?.length
+          ? { items: input.items.map(stripServerFields) }
+          : {}),
+      },
+    );
+    return created as ConversationObject;
+  }
+
+  async getConversation(id: string): Promise<ConversationObject | null> {
+    return this.call<ConversationObject>(
+      "GET",
+      `/conversations/${encodeURIComponent(id)}`,
+      undefined,
+      true,
+    );
+  }
+
+  async updateConversation(
+    id: string,
+    patch: { metadata?: Record<string, string> | null },
+  ): Promise<ConversationObject | null> {
+    if (patch.metadata === undefined) return this.getConversation(id);
+    return this.call<ConversationObject>(
+      "POST",
+      `/conversations/${encodeURIComponent(id)}`,
+      { metadata: patch.metadata },
+      true,
+    );
+  }
+
+  async deleteConversation(
+    id: string,
+  ): Promise<{ id: string; deleted: boolean }> {
+    const res = await this.call<{ id: string; deleted?: boolean }>(
+      "DELETE",
+      `/conversations/${encodeURIComponent(id)}`,
+      undefined,
+      true,
+    );
+    return { id, deleted: res ? (res.deleted ?? true) : false };
+  }
+
+  // ---- items ----
+  async appendItems(
+    conversationId: string,
+    items: ConversationItem[],
+  ): Promise<void> {
+    if (items.length === 0) return;
+    await this.call("POST", `/conversations/${encodeURIComponent(conversationId)}/items`, {
+      items: items.map(stripServerFields),
+    });
+  }
+
+  async listItems(
+    conversationId: string,
+    opts?: { limit?: number; after?: string; order?: "asc" | "desc" },
+  ): Promise<{ items: ConversationItem[]; hasMore: boolean }> {
+    const order = opts?.order ?? "asc";
+    const base = `/conversations/${encodeURIComponent(conversationId)}/items`;
+
+    // An explicit limit is one page, verbatim. No limit means "the whole
+    // conversation" — the caller is rebuilding history, and stopping at
+    // OpenAI's default page size would silently truncate it.
+    if (opts?.limit !== undefined) {
+      const page = await this.fetchPage(base, order, opts.limit, opts.after);
+      return { items: page.items, hasMore: page.hasMore };
+    }
+
+    const all: ConversationItem[] = [];
+    let after = opts?.after;
+    for (;;) {
+      const page = await this.fetchPage(base, order, this.pageSize, after);
+      all.push(...page.items);
+      if (!page.hasMore || !page.lastId) break;
+      after = page.lastId;
+    }
+    return { items: all, hasMore: false };
+  }
+
+  private async fetchPage(
+    base: string,
+    order: "asc" | "desc",
+    limit: number,
+    after?: string,
+  ): Promise<{
+    items: ConversationItem[];
+    hasMore: boolean;
+    lastId: string | null;
+  }> {
+    const qs = new URLSearchParams({ order, limit: String(limit) });
+    if (after) qs.set("after", after);
+    const res = await this.call<{
+      data?: ConversationItem[];
+      has_more?: boolean;
+      last_id?: string | null;
+    }>("GET", `${base}?${qs.toString()}`, undefined, true);
+    const items = res?.data ?? [];
+    return {
+      items,
+      hasMore: res?.has_more ?? false,
+      lastId:
+        res?.last_id ??
+        (items.length ? (getItemId(items[items.length - 1]) ?? null) : null),
+    };
+  }
+
+  async getItem(
+    conversationId: string,
+    itemId: string,
+  ): Promise<ConversationItem | null> {
+    return this.call<ConversationItem>(
+      "GET",
+      `/conversations/${encodeURIComponent(conversationId)}/items/${encodeURIComponent(itemId)}`,
+      undefined,
+      true,
+    );
+  }
+
+  async deleteItem(
+    conversationId: string,
+    itemId: string,
+  ): Promise<{ id: string; deleted: boolean }> {
+    const res = await this.call<unknown>(
+      "DELETE",
+      `/conversations/${encodeURIComponent(conversationId)}/items/${encodeURIComponent(itemId)}`,
+      undefined,
+      true,
+    );
+    return { id: itemId, deleted: res !== null };
+  }
+
+  // ---- responses ----
+  /** No-op: OpenAI persists the responses its own endpoint produced. */
+  async saveResponse(_resp: ResponseObject): Promise<void> {}
+
+  async getResponse(id: string): Promise<ResponseObject | null> {
+    return this.call<ResponseObject>(
+      "GET",
+      `/responses/${encodeURIComponent(id)}`,
+      undefined,
+      true,
+    );
+  }
+
+  async deleteResponse(id: string): Promise<{ id: string; deleted: boolean }> {
+    const res = await this.call<{ deleted?: boolean }>(
+      "DELETE",
+      `/responses/${encodeURIComponent(id)}`,
+      undefined,
+      true,
+    );
+    return { id, deleted: res ? (res.deleted ?? true) : false };
+  }
+}
+
+/** Ids are OpenAI's to assign; sending ours back is rejected as unknown input. */
+function stripServerFields(item: ConversationItem): ConversationItem {
+  const { id: _id, ...rest } = item as ConversationItem & { id?: string };
+  return rest as ConversationItem;
+}
+
+function getItemId(it: ConversationItem): string | undefined {
+  return (it as { id?: string }).id ?? (it as { call_id?: string }).call_id;
+}

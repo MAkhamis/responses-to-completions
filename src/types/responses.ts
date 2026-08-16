@@ -198,12 +198,6 @@ export type ToolChoice =
 
 export interface CreateResponseRequest {
   model: string;
-  /**
-   * Names which entry of the client's `backends` map serves this request.
-   * Falls back to the default `backend` when absent or unmatched. SDK-only
-   * routing key — never forwarded upstream.
-   */
-  source?: string;
   input: string | InputItem[];
   instructions?: string;
   previous_response_id?: string;
@@ -231,11 +225,27 @@ export type ResponseTextFormat =
   | { type: "json_object" }
   | { type: "json_schema"; name: string; schema: Record<string, unknown>; strict?: boolean; description?: string };
 
+export interface InputTokensDetails {
+  cached_tokens?: number;
+  /**
+   * Input tokens written to the cache. Only reported on GPT-5.6 and later,
+   * where writes are billed at 1.25x the uncached input rate (earlier models
+   * cache for free and omit the field).
+   */
+  cache_write_tokens?: number;
+  [k: string]: number | undefined;
+}
+
+export interface OutputTokensDetails {
+  reasoning_tokens?: number;
+  [k: string]: number | undefined;
+}
+
 export interface Usage {
   input_tokens: number;
-  input_tokens_details?: { cached_tokens?: number };
+  input_tokens_details?: InputTokensDetails;
   output_tokens: number;
-  output_tokens_details?: { reasoning_tokens?: number };
+  output_tokens_details?: OutputTokensDetails;
   total_tokens: number;
   cost?: number;
   cost_details?: UsageCostDetails;

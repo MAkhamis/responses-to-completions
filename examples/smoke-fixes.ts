@@ -26,16 +26,8 @@
  *     [--reasoning-model openai/o3-mini]   # only on --backend openrouter
  */
 import { rm } from "node:fs/promises";
-import {
-  LocalFileStore,
-  OllamaAdapter,
-  OpenAICompatAdapter,
-  OpenRouterAdapter,
-  ResponsesClient,
-  type BackendAdapter,
-  type Store,
-  type StreamEvent,
-} from "../src/index.js";
+import { ResponsesClient, type StreamEvent } from "../src/index.js";
+import { clientOptions } from "./build-client.js";
 
 interface Args {
   backend: "openai-compat" | "ollama" | "openrouter";
@@ -54,11 +46,8 @@ interface TestResult {
 }
 
 async function main(args: Args): Promise<number> {
-  const backend = buildBackend(args);
-  const store: Store | undefined = args.storeLocal
-    ? new LocalFileStore(args.storeLocal)
-    : undefined;
-  const client = new ResponsesClient({ backend, store });
+  const store = args.storeLocal !== undefined;
+  const client = new ResponsesClient(clientOptions(args));
   const results: TestResult[] = [];
 
   // === A. Request validation (no network) ================================
@@ -89,7 +78,9 @@ async function main(args: Args): Promise<number> {
   );
 
   if (!store) {
-    const storelessClient = new ResponsesClient({ backend });
+    const storelessClient = new ResponsesClient(
+      clientOptions({ ...args, storeLocal: undefined }),
+    );
     results.push(
       await runTest("A3: store ops without store throw clearly", async () => {
         await expectThrow(
@@ -745,24 +736,6 @@ function parseArgs(argv: string[]): Args {
     storeLocal: get("store-local"),
     responsesEndpoint: hasFlag("responses-endpoint"),
   };
-}
-
-function buildBackend(args: Args): BackendAdapter {
-  const endpoint: "completions" | "responses" = args.responsesEndpoint
-    ? "responses"
-    : "completions";
-  if (args.backend === "ollama") return new OllamaAdapter({ host: args.baseUrl });
-  if (args.backend === "openrouter") {
-    if (!args.apiKey) throw new Error("--api-key is required for openrouter");
-    return new OpenRouterAdapter({ apiKey: args.apiKey, endpoint });
-  }
-  if (!args.baseUrl)
-    throw new Error("--base-url is required for openai-compat");
-  return new OpenAICompatAdapter({
-    baseUrl: args.baseUrl,
-    apiKey: args.apiKey,
-    endpoint,
-  });
 }
 
 async function runTest(

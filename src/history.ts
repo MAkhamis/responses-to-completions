@@ -13,7 +13,8 @@ export interface ResolvedHistory {
  * Priority: explicit `conversation` > `previous_response_id` > none.
  *
  * - `conversation` set ⇒ load items from that conversation (auto-create if it
- *   doesn't already exist, so clients may pass their own ids).
+ *   doesn't already exist, so clients may pass their own ids — except on a
+ *   store where the provider assigns them, where an unknown id throws).
  * - `previous_response_id` set ⇒ if the prior response was tied to a
  *   conversation continue that conversation; otherwise hand back the prior
  *   response's outputs as ephemeral history with no persistence.
@@ -44,6 +45,14 @@ export async function resolveHistory(args: {
         : request.conversation.id;
     const existing = await store.getConversation(convId);
     if (!existing) {
+      // Auto-create only works where the caller owns the keyspace. On a
+      // provider-keyed store the create would be refused for supplying an id
+      // at all, which describes the API rather than what went wrong here.
+      if (store.assignsConversationIds) {
+        throw new Error(
+          `conversation not found: ${convId}. This store does not assign conversation ids — the provider does, so a conversation cannot be created under an id chosen here. Call \`conversations.create()\` and pass the id it returns.`,
+        );
+      }
       await store.createConversation({ id: convId });
       return { history: [], conversationId: convId, inputItems };
     }
@@ -60,7 +69,9 @@ export async function resolveHistory(args: {
     const prev = await store.getResponse(request.previous_response_id);
     if (!prev) {
       throw new Error(
-        `previous_response_id not found: ${request.previous_response_id}`,
+        store.readsResponsesThrough
+          ? `previous_response_id not found: ${request.previous_response_id}. This store does not persist responses itself — it reads them back from the provider, so only ids the provider issued resolve. A response synthesized from a chat-completions turn has none: continue with \`conversation\`, reach the provider's native endpoint (\`config.endpoint: "responses"\`), or use a store that persists responses ("local"/"S3").`
+          : `previous_response_id not found: ${request.previous_response_id}`,
       );
     }
     if (prev.conversation?.id) {

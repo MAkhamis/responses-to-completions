@@ -10,7 +10,9 @@
 export {
   ResponsesClient,
   StreamResponse,
+  StorePersistenceError,
   type ResponsesClientOptions,
+  type ClientSource,
 } from "./client.js";
 
 // Lower-level building blocks for advanced users who want to bypass the client.
@@ -23,19 +25,41 @@ export {
   OllamaAdapter,
   OpenRouterAdapter,
   BackendError,
+  createBackendForSource,
+  KNOWN_PROVIDER_SOURCES,
+  type OpenRouterOnlyConfig,
+  type OllamaOnlyConfig,
+  type ConfigForSource,
+  type OpenAIProviderConfig,
+  type OpenRouterProviderConfig,
+  type OllamaProviderConfig,
+  type OllamaCompatProviderConfig,
+  type OllamaNativeProviderConfig,
   type BackendAdapter,
   type OpenAICompatAdapterOptions,
   type OllamaAdapterOptions,
   type OpenRouterAdapterOptions,
+  type OpenRouterProviderPreferences,
+  type KnownProviderSource,
+  type ProviderConfig,
 } from "./backend/index.js";
 
 // Stores
 export {
   LocalFileStore,
   S3Store,
+  OpenAIConversationStore,
+  OpenAIStoreError,
+  createStoreForClient,
   type Store,
   type ConversationItem,
   type S3StoreOptions,
+  type OpenAIConversationStoreOptions,
+  type StoreClient,
+  type StoreConfigForClient,
+  type S3StoreClientConfig,
+  type LocalStoreClientConfig,
+  type OpenAIStoreClientConfig,
 } from "./store/index.js";
 
 // MCP

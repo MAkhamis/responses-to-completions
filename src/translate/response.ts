@@ -124,6 +124,7 @@ export function translateUsage(u?: ChatCompletionUsage): Usage | null {
     ...(u.prompt_tokens_details
       ? {
           input_tokens_details: {
+            ...u.prompt_tokens_details,
             cached_tokens: u.prompt_tokens_details.cached_tokens ?? 0,
           },
         }
@@ -131,6 +132,7 @@ export function translateUsage(u?: ChatCompletionUsage): Usage | null {
     ...(u.completion_tokens_details
       ? {
           output_tokens_details: {
+            ...u.completion_tokens_details,
             reasoning_tokens: u.completion_tokens_details.reasoning_tokens ?? 0,
           },
         }
