@@ -20,6 +20,7 @@ export interface Args {
   apiKey?: string;
   model: string;
   storeLocal?: string;
+  ollamaNative?: boolean;
 }
 
 interface TestResult {
@@ -201,6 +202,7 @@ export function parseArgs(argv: string[]): Args {
     apiKey: get("api-key"),
     model,
     storeLocal: get("store-local"),
+    ollamaNative: argv.includes("--ollama-native"),
   };
 }
 
@@ -246,4 +248,3 @@ function printSummary(results: TestResult[]): void {
   console.log("─".repeat(60));
   console.log(`  ${pass} passed, ${fail} failed, ${skip} skipped`);
 }
-

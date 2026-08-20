@@ -20,7 +20,11 @@ export class LocalFileStore implements Store {
   constructor(private root: string) {}
 
   private convPath(id: string) {
-    return path.join(this.root, "conversations", `${encodeURIComponent(id)}.json`);
+    return path.join(
+      this.root,
+      "conversations",
+      `${encodeURIComponent(id)}.json`,
+    );
   }
   private respPath(id: string) {
     return path.join(this.root, "responses", `${encodeURIComponent(id)}.json`);
@@ -34,7 +38,10 @@ export class LocalFileStore implements Store {
     const prev = this.locks.get(key) ?? Promise.resolve();
     let release!: () => void;
     const next = new Promise<void>((r) => (release = r));
-    this.locks.set(key, prev.then(() => next));
+    this.locks.set(
+      key,
+      prev.then(() => next),
+    );
     await prev;
     try {
       return await fn();
@@ -81,9 +88,9 @@ export class LocalFileStore implements Store {
   }
 
   async getConversation(id: string): Promise<ConversationObject | null> {
-    const data = await this.readJson<ConversationObject & { items: ConversationItem[] }>(
-      this.convPath(id),
-    );
+    const data = await this.readJson<
+      ConversationObject & { items: ConversationItem[] }
+    >(this.convPath(id));
     if (!data) return null;
     const { items: _omit, ...meta } = data;
     return meta;
@@ -94,9 +101,9 @@ export class LocalFileStore implements Store {
     patch: { metadata?: Record<string, string> | null },
   ): Promise<ConversationObject | null> {
     return this.withLock(`conv:${id}`, async () => {
-      const data = await this.readJson<ConversationObject & { items: ConversationItem[] }>(
-        this.convPath(id),
-      );
+      const data = await this.readJson<
+        ConversationObject & { items: ConversationItem[] }
+      >(this.convPath(id));
       if (!data) return null;
       if (patch.metadata !== undefined) data.metadata = patch.metadata;
       await this.writeJson(this.convPath(id), data);
@@ -105,23 +112,29 @@ export class LocalFileStore implements Store {
     });
   }
 
-  async deleteConversation(id: string): Promise<{ id: string; deleted: boolean }> {
+  async deleteConversation(
+    id: string,
+  ): Promise<{ id: string; deleted: boolean }> {
     try {
       await fs.unlink(this.convPath(id));
       return { id, deleted: true };
     } catch (e) {
-      if ((e as NodeJS.ErrnoException).code === "ENOENT") return { id, deleted: false };
+      if ((e as NodeJS.ErrnoException).code === "ENOENT")
+        return { id, deleted: false };
       throw e;
     }
   }
 
   // ---- items ----
-  async appendItems(conversationId: string, items: ConversationItem[]): Promise<void> {
+  async appendItems(
+    conversationId: string,
+    items: ConversationItem[],
+  ): Promise<void> {
     if (items.length === 0) return;
     await this.withLock(`conv:${conversationId}`, async () => {
-      const data = await this.readJson<ConversationObject & { items: ConversationItem[] }>(
-        this.convPath(conversationId),
-      );
+      const data = await this.readJson<
+        ConversationObject & { items: ConversationItem[] }
+      >(this.convPath(conversationId));
       if (!data) throw new Error(`Conversation not found: ${conversationId}`);
       data.items.push(...items);
       await this.writeJson(this.convPath(conversationId), data);
@@ -132,9 +145,9 @@ export class LocalFileStore implements Store {
     conversationId: string,
     opts?: { limit?: number; after?: string; order?: "asc" | "desc" },
   ): Promise<{ items: ConversationItem[]; hasMore: boolean }> {
-    const data = await this.readJson<ConversationObject & { items: ConversationItem[] }>(
-      this.convPath(conversationId),
-    );
+    const data = await this.readJson<
+      ConversationObject & { items: ConversationItem[] }
+    >(this.convPath(conversationId));
     if (!data) return { items: [], hasMore: false };
 
     let items = data.items.slice();
@@ -152,9 +165,9 @@ export class LocalFileStore implements Store {
     conversationId: string,
     itemId: string,
   ): Promise<ConversationItem | null> {
-    const data = await this.readJson<ConversationObject & { items: ConversationItem[] }>(
-      this.convPath(conversationId),
-    );
+    const data = await this.readJson<
+      ConversationObject & { items: ConversationItem[] }
+    >(this.convPath(conversationId));
     if (!data) return null;
     return data.items.find((it) => getItemId(it) === itemId) ?? null;
   }
@@ -164,9 +177,9 @@ export class LocalFileStore implements Store {
     itemId: string,
   ): Promise<{ id: string; deleted: boolean }> {
     return this.withLock(`conv:${conversationId}`, async () => {
-      const data = await this.readJson<ConversationObject & { items: ConversationItem[] }>(
-        this.convPath(conversationId),
-      );
+      const data = await this.readJson<
+        ConversationObject & { items: ConversationItem[] }
+      >(this.convPath(conversationId));
       if (!data) return { id: itemId, deleted: false };
       const before = data.items.length;
       data.items = data.items.filter((it) => getItemId(it) !== itemId);
@@ -190,7 +203,8 @@ export class LocalFileStore implements Store {
       await fs.unlink(this.respPath(id));
       return { id, deleted: true };
     } catch (e) {
-      if ((e as NodeJS.ErrnoException).code === "ENOENT") return { id, deleted: false };
+      if ((e as NodeJS.ErrnoException).code === "ENOENT")
+        return { id, deleted: false };
       throw e;
     }
   }

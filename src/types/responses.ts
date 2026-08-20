@@ -43,9 +43,7 @@ export interface RefusalContent {
 }
 
 export type InputContentPart =
-  | InputTextContent
-  | InputImageContent
-  | InputFileContent;
+  InputTextContent | InputImageContent | InputFileContent;
 
 export type OutputContentPart = OutputTextContent | RefusalContent;
 
@@ -212,7 +210,10 @@ export interface CreateResponseRequest {
   max_output_tokens?: number;
   max_tool_calls?: number;
   metadata?: Record<string, string>;
-  reasoning?: { effort?: "minimal" | "low" | "medium" | "high"; summary?: "auto" | "concise" | "detailed" };
+  reasoning?: {
+    effort?: "minimal" | "low" | "medium" | "high";
+    summary?: "auto" | "concise" | "detailed";
+  };
   service_tier?: "auto" | "default" | "flex" | "priority";
   text?: { format?: ResponseTextFormat; verbosity?: "low" | "medium" | "high" };
   include?: string[];
@@ -223,7 +224,13 @@ export interface CreateResponseRequest {
 export type ResponseTextFormat =
   | { type: "text" }
   | { type: "json_object" }
-  | { type: "json_schema"; name: string; schema: Record<string, unknown>; strict?: boolean; description?: string };
+  | {
+      type: "json_schema";
+      name: string;
+      schema: Record<string, unknown>;
+      strict?: boolean;
+      description?: string;
+    };
 
 export interface InputTokensDetails {
   cached_tokens?: number;

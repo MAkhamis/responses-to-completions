@@ -16,11 +16,11 @@ import {
  */
 export type KnownProviderSource = "openAI" | "openRouter" | "ollama";
 
-export const KNOWN_PROVIDER_SOURCES: KnownProviderSource[] = [
+export const KNOWN_PROVIDER_SOURCES: readonly KnownProviderSource[] = [
   "openAI",
   "openRouter",
   "ollama",
-];
+] as const;
 
 /** Default endpoint per known source, so config carries only credentials. */
 const DEFAULT_BASE_URLS: Record<KnownProviderSource, string> = {
@@ -71,7 +71,8 @@ type Excluded<T> = { [K in keyof T]?: never };
  * endpoint (`https://api.openai.com/v1`).
  */
 export interface OpenAIProviderConfig
-  extends Omit<OpenAICompatAdapterOptions, "baseUrl">,
+  extends
+    Omit<OpenAICompatAdapterOptions, "baseUrl">,
     Excluded<OpenRouterOnlyConfig>,
     Excluded<OllamaOnlyConfig> {
   /** Optional here — defaults to `https://api.openai.com/v1`. */
@@ -85,8 +86,7 @@ export interface OpenAIProviderConfig
  * keys.
  */
 export interface OpenRouterProviderConfig
-  extends Omit<OpenRouterAdapterOptions, "apiKey">,
-    Excluded<OllamaOnlyConfig> {
+  extends Omit<OpenRouterAdapterOptions, "apiKey">, Excluded<OllamaOnlyConfig> {
   /** Optional here — validated when the backend is built. */
   apiKey?: string;
   /** OpenRouter's adapter has no such option. */
@@ -99,7 +99,8 @@ export interface OpenRouterProviderConfig
  * {@link OpenAICompatAdapterOptions} plus `host`.
  */
 export interface OllamaCompatProviderConfig
-  extends Omit<OpenAICompatAdapterOptions, "baseUrl">,
+  extends
+    Omit<OpenAICompatAdapterOptions, "baseUrl">,
     Excluded<OpenRouterOnlyConfig> {
   /** Optional here — defaults to `http://localhost:11434/v1`. */
   baseUrl?: string;
@@ -115,8 +116,7 @@ export interface OllamaCompatProviderConfig
  * keys are typed away rather than silently ignored.
  */
 export interface OllamaNativeProviderConfig
-  extends OllamaAdapterOptions,
-    Excluded<OpenRouterOnlyConfig> {
+  extends OllamaAdapterOptions, Excluded<OpenRouterOnlyConfig> {
   api: "native";
   /** `/api/chat` takes no bearer token — put auth in `headers` if a gateway needs one. */
   apiKey?: never;
@@ -130,8 +130,7 @@ export interface OllamaNativeProviderConfig
 
 /** `source: "ollama"` — the OpenAI-compatible route by default, or native NDJSON. */
 export type OllamaProviderConfig =
-  | OllamaCompatProviderConfig
-  | OllamaNativeProviderConfig;
+  OllamaCompatProviderConfig | OllamaNativeProviderConfig;
 
 /** The config shape a given source accepts. */
 export type ConfigForSource<S extends KnownProviderSource> = S extends "openAI"
@@ -146,7 +145,8 @@ export type ConfigForSource<S extends KnownProviderSource> = S extends "openAI"
  * string. Prefer {@link ConfigForSource} when the source is known.
  */
 export interface ProviderConfig
-  extends Omit<OpenAICompatAdapterOptions, "baseUrl">,
+  extends
+    Omit<OpenAICompatAdapterOptions, "baseUrl">,
     OpenRouterOnlyConfig,
     OllamaOnlyConfig {
   baseUrl?: string;
@@ -237,4 +237,3 @@ function toCompatBaseUrl(host: string): string {
 function toHost(baseUrl: string): string {
   return baseUrl.replace(/\/+$/, "").replace(/\/v\d+$/, "");
 }
-

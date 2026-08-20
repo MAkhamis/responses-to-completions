@@ -61,7 +61,8 @@ export interface StoreCredentialFallback {
  */
 export function createStoreForClient(
   client: StoreClient,
-  config?: S3StoreClientConfig | OpenAIStoreClientConfig | LocalStoreClientConfig,
+  config?:
+    S3StoreClientConfig | OpenAIStoreClientConfig | LocalStoreClientConfig,
   fallback: StoreCredentialFallback = {},
 ): Store {
   if (client === "local") {
@@ -83,15 +84,16 @@ export function createStoreForClient(
       );
     }
     const baseUrl = c.baseUrl ?? fallback.baseUrl;
+    const fetchImpl = c.fetch ?? fallback.fetch;
+    const headers =
+      c.headers !== undefined || fallback.headers !== undefined
+        ? { ...fallback.headers, ...c.headers }
+        : undefined;
     return new OpenAIConversationStore({
       apiKey,
       ...(baseUrl ? { baseUrl } : {}),
-      ...(c.headers ?? fallback.headers
-        ? { headers: { ...fallback.headers, ...c.headers } }
-        : {}),
-      ...(c.fetch ?? fallback.fetch
-        ? { fetch: (c.fetch ?? fallback.fetch)! }
-        : {}),
+      ...(headers ? { headers } : {}),
+      ...(fetchImpl ? { fetch: fetchImpl } : {}),
       ...(c.pageSize !== undefined ? { pageSize: c.pageSize } : {}),
     });
   }
@@ -114,24 +116,38 @@ export function createStoreForClient(
  * Construction happens once; every later call reuses the same instance.
  */
 class LazyStore implements Store {
+  readonly readsResponsesThrough: boolean | undefined;
+  readonly assignsConversationIds: boolean | undefined;
   private pending: Promise<Store> | undefined;
 
-  constructor(private readonly load: () => Promise<Store>) {}
+  constructor(
+    private readonly load: () => Promise<Store>,
+    flags: Pick<Store, "readsResponsesThrough" | "assignsConversationIds"> = {},
+  ) {
+    this.readsResponsesThrough = flags.readsResponsesThrough;
+    this.assignsConversationIds = flags.assignsConversationIds;
+  }
 
   private inner(): Promise<Store> {
     return (this.pending ??= this.load());
   }
 
-  async createConversation(input: {
-    id?: string;
-    metadata?: Record<string, string> | null;
-    items?: ConversationItem[];
-  }): Promise<ConversationObject> {
-    return (await this.inner()).createConversation(input);
+  async createConversation(
+    input: {
+      id?: string;
+      metadata?: Record<string, string> | null;
+      items?: ConversationItem[];
+    },
+    signal?: AbortSignal,
+  ): Promise<ConversationObject> {
+    return (await this.inner()).createConversation(input, signal);
   }
 
-  async getConversation(id: string): Promise<ConversationObject | null> {
-    return (await this.inner()).getConversation(id);
+  async getConversation(
+    id: string,
+    signal?: AbortSignal,
+  ): Promise<ConversationObject | null> {
+    return (await this.inner()).getConversation(id, signal);
   }
 
   async updateConversation(
@@ -150,15 +166,17 @@ class LazyStore implements Store {
   async appendItems(
     conversationId: string,
     items: ConversationItem[],
+    signal?: AbortSignal,
   ): Promise<void> {
-    return (await this.inner()).appendItems(conversationId, items);
+    return (await this.inner()).appendItems(conversationId, items, signal);
   }
 
   async listItems(
     conversationId: string,
     opts?: { limit?: number; after?: string; order?: "asc" | "desc" },
+    signal?: AbortSignal,
   ): Promise<{ items: ConversationItem[]; hasMore: boolean }> {
-    return (await this.inner()).listItems(conversationId, opts);
+    return (await this.inner()).listItems(conversationId, opts, signal);
   }
 
   async getItem(
@@ -175,12 +193,18 @@ class LazyStore implements Store {
     return (await this.inner()).deleteItem(conversationId, itemId);
   }
 
-  async saveResponse(resp: ResponseObject): Promise<void> {
-    return (await this.inner()).saveResponse(resp);
+  async saveResponse(
+    resp: ResponseObject,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    return (await this.inner()).saveResponse(resp, signal);
   }
 
-  async getResponse(id: string): Promise<ResponseObject | null> {
-    return (await this.inner()).getResponse(id);
+  async getResponse(
+    id: string,
+    signal?: AbortSignal,
+  ): Promise<ResponseObject | null> {
+    return (await this.inner()).getResponse(id, signal);
   }
 
   async deleteResponse(id: string): Promise<{ id: string; deleted: boolean }> {

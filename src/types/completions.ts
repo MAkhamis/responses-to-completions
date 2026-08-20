@@ -5,11 +5,7 @@
  */
 
 export type CompletionsRole =
-  | "system"
-  | "developer"
-  | "user"
-  | "assistant"
-  | "tool";
+  "system" | "developer" | "user" | "assistant" | "tool";
 
 export interface TextContentPart {
   type: "text";
@@ -36,9 +32,7 @@ export interface FileContentPart {
 }
 
 export type CompletionsContentPart =
-  | TextContentPart
-  | ImageUrlContentPart
-  | FileContentPart;
+  TextContentPart | ImageUrlContentPart | FileContentPart;
 
 export interface SystemMessage {
   role: "system" | "developer";
@@ -70,10 +64,7 @@ export interface ToolMessage {
 }
 
 export type ChatMessage =
-  | SystemMessage
-  | UserMessage
-  | AssistantMessage
-  | ToolMessage;
+  SystemMessage | UserMessage | AssistantMessage | ToolMessage;
 
 export interface ChatToolCall {
   id: string;
@@ -152,7 +143,6 @@ export interface ChatCompletionChoice {
     | null;
   logprobs?: unknown;
 }
-
 
 export interface UsageCostDetails {
   upstream_inference_cost?: number | null;

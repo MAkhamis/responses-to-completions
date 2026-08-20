@@ -102,4 +102,24 @@ describe("translateUsage token details", () => {
 
     expect(usage?.input_tokens_details).toEqual({ cached_tokens: 0 });
   });
+
+  it("drops null detail values instead of leaking them into number fields", () => {
+    // OpenRouter-style backends normalize absent detail fields to JSON null.
+    const usage = translateUsage({
+      prompt_tokens: 10,
+      completion_tokens: 5,
+      total_tokens: 15,
+      prompt_tokens_details: { cached_tokens: 0, audio_tokens: null } as never,
+      completion_tokens_details: {
+        reasoning_tokens: null,
+        audio_tokens: 3,
+      } as never,
+    });
+
+    expect(usage?.input_tokens_details).toEqual({ cached_tokens: 0 });
+    expect(usage?.output_tokens_details).toEqual({
+      reasoning_tokens: 0,
+      audio_tokens: 3,
+    });
+  });
 });

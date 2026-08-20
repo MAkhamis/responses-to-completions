@@ -27,6 +27,7 @@ import type {
   CreateResponseRequest,
   OutputItem,
   ResponseObject,
+  ResponseStatus,
   Usage,
 } from "./types/responses.js";
 import { genResponseId, now } from "./util/ids.js";
@@ -56,9 +57,11 @@ interface StoreToLocal {
 }
 
 /**
- * Persist to OpenAI's Conversations API. Restricted to `source: "openAI"`:
- * every read and write ships the transcript to api.openai.com, so pointing
- * another provider's traffic at it would hand OpenAI their conversations.
+ * Persist to OpenAI's Conversations API. Restricted to `source: "openAI"`
+ * without a custom `baseUrl`: every read and write ships the transcript to
+ * api.openai.com, so pointing another provider's traffic at it would hand
+ * OpenAI their conversations — and a custom `baseUrl` names a compat server
+ * that has no Conversations API to serve the store.
  * `store_config` may be omitted — the provider config's credentials are used.
  */
 interface StoreToOpenAI {
@@ -122,8 +125,12 @@ interface ClientCommonOptions {
 export type ResponsesClientOptions =
   | (ClientCommonOptions & {
       source: "openAI";
-      config: OpenAIProviderConfig;
+      config: OpenAIProviderConfig & { baseUrl?: never };
     } & (StoreDisabled | StoreToS3 | StoreToLocal | StoreToOpenAI))
+  | (ClientCommonOptions & {
+      source: "openAI";
+      config: OpenAIProviderConfig & { baseUrl: string };
+    } & (StoreDisabled | StoreToS3 | StoreToLocal))
   | (ClientCommonOptions & {
       source: "openRouter";
       config: OpenRouterProviderConfig;
@@ -172,7 +179,9 @@ export class ResponsesClient {
   /**
    * The store that fits a `store_client`. The source's own credentials are
    * offered as a fallback, so `store_client: "openAI"` needs no second copy
-   * of the API key.
+   * of the API key. The provider's `baseUrl` is deliberately not part of the
+   * fallback: conversations always go to api.openai.com unless
+   * `store_config.baseUrl` says otherwise.
    */
   protected createStore(
     client: StoreClient,
@@ -185,7 +194,6 @@ export class ResponsesClient {
   ): Store {
     return createStoreForClient(client, config, {
       apiKey: providerConfig.apiKey,
-      baseUrl: providerConfig.baseUrl,
       headers: providerConfig.headers,
       fetch: providerConfig.fetch,
     });
@@ -261,9 +269,7 @@ export class ResponsesClient {
       store?: boolean;
       store_client?: StoreClient;
       store_config?:
-        | S3StoreClientConfig
-        | LocalStoreClientConfig
-        | OpenAIStoreClientConfig;
+        S3StoreClientConfig | LocalStoreClientConfig | OpenAIStoreClientConfig;
       maxIterations?: number;
     };
     const config = opts.config ?? {};
@@ -276,13 +282,16 @@ export class ResponsesClient {
         'ResponsesClient: needs a `source` (with its `config`) to reach a provider, a store to read from, or both. Got neither — pass `source: "openAI" | "openRouter" | "ollama"`, or `store: true` with a `store_client`.',
       );
     }
-    if (
-      opts.source &&
-      (opts.source === "openAI" || opts.source === "openRouter") &&
-      !config.apiKey
-    ) {
+
+    const needsApiKey =
+      opts.source === "openRouter" ||
+      (opts.source === "openAI" && !config.baseUrl);
+    if (needsApiKey && !config.apiKey) {
       throw new Error(
-        `ResponsesClient: source "${opts.source}" requires \`config.apiKey\`.`,
+        `ResponsesClient: source "${opts.source}" requires \`config.apiKey\`.` +
+          (opts.source === "openAI"
+            ? " A keyless OpenAI-compatible server is reached with a custom `config.baseUrl`, which lifts this requirement."
+            : ""),
       );
     }
 
@@ -300,6 +309,12 @@ export class ResponsesClient {
       if (opts.store_client === "openAI" && opts.source !== "openAI") {
         throw new Error(
           `ResponsesClient: store_client "openAI" is only available for source "openAI" — it would send ${opts.source} conversations to api.openai.com. Use "S3".`,
+        );
+      }
+
+      if (opts.store_client === "openAI" && config.baseUrl) {
+        throw new Error(
+          'ResponsesClient: store_client "openAI" is not available with a custom `config.baseUrl` — that names an OpenAI-compatible server, which has no Conversations API. Use store_client "S3" or "local".',
         );
       }
       this.store = this.createStore(
@@ -368,7 +383,8 @@ export class ResponsesClient {
       update: async (id, patch) =>
         requireStore("conversations.update").updateConversation(id, patch),
       del: async (id) => {
-        const r = await requireStore("conversations.del").deleteConversation(id);
+        const r =
+          await requireStore("conversations.del").deleteConversation(id);
         return {
           id: r.id,
           object: "conversation.deleted",
@@ -435,6 +451,7 @@ export class ResponsesClient {
     const { history, conversationId, inputItems } = await resolveHistory({
       request: req,
       store,
+      signal: req.signal,
     });
 
     const responseId = genResponseId();
@@ -479,7 +496,10 @@ export class ResponsesClient {
     const finalResp: ResponseObject = {
       ...initialResp,
       id: result.upstreamResponseId ?? initialResp.id,
-      status: "completed",
+      status: result.status ?? "completed",
+      ...(result.incompleteDetails
+        ? { incomplete_details: result.incompleteDetails }
+        : {}),
       output: result.items,
       output_text: aggregateText(result.items),
       usage: result.usage,
@@ -493,6 +513,7 @@ export class ResponsesClient {
         inputItems,
         outputItems: result.items,
         response: finalResp,
+        signal: req.signal,
       });
     }
     return finalResp;
@@ -608,7 +629,7 @@ export class StreamResponse implements AsyncIterable<StreamEvent> {
       persist,
     } = this.deps;
     let seq = 0;
-  let delivered = false;
+    let delivered = false;
     let responseId = initialResponse.id;
     let announced = false;
 
@@ -639,6 +660,8 @@ export class StreamResponse implements AsyncIterable<StreamEvent> {
       let items: OutputItem[] = [];
       let usage: Usage | null = null;
       let servedTier: string | null = null;
+      let status: ResponseStatus | undefined;
+      let incompleteDetails: { reason: string } | null = null;
 
       const gen = agent.stream({
         request,
@@ -654,6 +677,8 @@ export class StreamResponse implements AsyncIterable<StreamEvent> {
           items = r.value.items;
           usage = r.value.usage;
           servedTier = r.value.serviceTier ?? null;
+          status = r.value.status;
+          incompleteDetails = r.value.incompleteDetails ?? null;
           if (!announced && r.value.upstreamResponseId) {
             responseId = r.value.upstreamResponseId;
           }
@@ -666,7 +691,8 @@ export class StreamResponse implements AsyncIterable<StreamEvent> {
 
       const finalResp: ResponseObject = {
         ...snapshot(),
-        status: "completed",
+        status: status ?? "completed",
+        ...(incompleteDetails ? { incomplete_details: incompleteDetails } : {}),
         output: items,
         output_text: aggregateText(items),
         usage,
@@ -676,7 +702,10 @@ export class StreamResponse implements AsyncIterable<StreamEvent> {
       };
       delivered = true;
       this.emit({
-        type: "response.completed",
+        type:
+          status === "incomplete"
+            ? "response.incomplete"
+            : "response.completed",
         sequence_number: seq++,
         response: finalResp,
       });
@@ -687,6 +716,7 @@ export class StreamResponse implements AsyncIterable<StreamEvent> {
           inputItems,
           outputItems: items,
           response: finalResp,
+          signal,
         });
       }
       this.finalResolve(finalResp);
@@ -741,13 +771,19 @@ async function persistTurn(args: {
   inputItems: ConversationItem[];
   outputItems: OutputItem[];
   response: ResponseObject;
+  signal?: AbortSignal;
 }): Promise<void> {
-  const { store, conversationId, inputItems, outputItems, response } = args;
+  const { store, conversationId, inputItems, outputItems, response, signal } =
+    args;
   try {
     if (conversationId) {
-      await store.appendItems(conversationId, [...inputItems, ...outputItems]);
+      await store.appendItems(
+        conversationId,
+        [...inputItems, ...outputItems],
+        signal,
+      );
     }
-    await store.saveResponse(response);
+    await store.saveResponse(response, signal);
   } catch (err) {
     throw new StorePersistenceError(response, err);
   }

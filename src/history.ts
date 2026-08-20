@@ -29,8 +29,9 @@ export interface ResolvedHistory {
 export async function resolveHistory(args: {
   request: CreateResponseRequest;
   store: Store | undefined;
+  signal?: AbortSignal;
 }): Promise<ResolvedHistory> {
-  const { request, store } = args;
+  const { request, store, signal } = args;
   const inputItems = normalizeInputItems(request.input);
 
   if (request.conversation) {
@@ -43,7 +44,7 @@ export async function resolveHistory(args: {
       typeof request.conversation === "string"
         ? request.conversation
         : request.conversation.id;
-    const existing = await store.getConversation(convId);
+    const existing = await store.getConversation(convId, signal);
     if (!existing) {
       // Auto-create only works where the caller owns the keyspace. On a
       // provider-keyed store the create would be refused for supplying an id
@@ -53,10 +54,10 @@ export async function resolveHistory(args: {
           `conversation not found: ${convId}. This store does not assign conversation ids — the provider does, so a conversation cannot be created under an id chosen here. Call \`conversations.create()\` and pass the id it returns.`,
         );
       }
-      await store.createConversation({ id: convId });
+      await store.createConversation({ id: convId }, signal);
       return { history: [], conversationId: convId, inputItems };
     }
-    const { items } = await store.listItems(convId);
+    const { items } = await store.listItems(convId, undefined, signal);
     return { history: items, conversationId: convId, inputItems };
   }
 
@@ -66,7 +67,7 @@ export async function resolveHistory(args: {
         "A store is required to use `previous_response_id`. Pass `store` when constructing ResponsesClient.",
       );
     }
-    const prev = await store.getResponse(request.previous_response_id);
+    const prev = await store.getResponse(request.previous_response_id, signal);
     if (!prev) {
       throw new Error(
         store.readsResponsesThrough
@@ -75,7 +76,11 @@ export async function resolveHistory(args: {
       );
     }
     if (prev.conversation?.id) {
-      const { items } = await store.listItems(prev.conversation.id);
+      const { items } = await store.listItems(
+        prev.conversation.id,
+        undefined,
+        signal,
+      );
       return {
         history: items,
         conversationId: prev.conversation.id,

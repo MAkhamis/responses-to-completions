@@ -37,6 +37,7 @@ interface Args {
   reasoningModel?: string;
   storeLocal?: string;
   responsesEndpoint: boolean;
+  ollamaNative?: boolean;
 }
 
 interface TestResult {
@@ -65,16 +66,19 @@ async function main(args: Args): Promise<number> {
   );
 
   results.push(
-    await runTest("A2: missing input + previous_response_id throws", async () => {
-      await expectThrow(
-        () =>
-          (client.responses.create as (req: unknown) => Promise<unknown>)({
-            model: args.model,
-          }),
-        /input|previous_response_id/i,
-      );
-      return "ok";
-    }),
+    await runTest(
+      "A2: missing input + previous_response_id throws",
+      async () => {
+        await expectThrow(
+          () =>
+            (client.responses.create as (req: unknown) => Promise<unknown>)({
+              model: args.model,
+            }),
+          /input|previous_response_id/i,
+        );
+        return "ok";
+      },
+    ),
   );
 
   if (!store) {
@@ -123,7 +127,11 @@ async function main(args: Args): Promise<number> {
       const resp = await client.responses.create({
         model: args.model,
         input: [
-          { type: "message", role: "user", content: "Reply with the word 'ok'." },
+          {
+            type: "message",
+            role: "user",
+            content: "Reply with the word 'ok'.",
+          },
         ],
       });
       assert(resp.status === "completed", `status=${resp.status}`);
@@ -245,59 +253,65 @@ async function main(args: Args): Promise<number> {
   );
 
   results.push(
-    await runTest("C4: event ordering — sequence_number monotonic", async () => {
-      const stream = await client.responses.create({
-        model: args.model,
-        input: "Reply with 'ok'.",
-        stream: true,
-      });
-      let lastSeq = -1;
-      let count = 0;
-      for await (const ev of stream) {
-        assert(
-          ev.sequence_number > lastSeq,
-          `sequence_number not monotonic: ${ev.sequence_number} ≤ ${lastSeq}`,
-        );
-        lastSeq = ev.sequence_number;
-        count++;
-      }
-      await stream.finalResponse();
-      return `events=${count} maxSeq=${lastSeq}`;
-    }),
+    await runTest(
+      "C4: event ordering — sequence_number monotonic",
+      async () => {
+        const stream = await client.responses.create({
+          model: args.model,
+          input: "Reply with 'ok'.",
+          stream: true,
+        });
+        let lastSeq = -1;
+        let count = 0;
+        for await (const ev of stream) {
+          assert(
+            ev.sequence_number > lastSeq,
+            `sequence_number not monotonic: ${ev.sequence_number} ≤ ${lastSeq}`,
+          );
+          lastSeq = ev.sequence_number;
+          count++;
+        }
+        await stream.finalResponse();
+        return `events=${count} maxSeq=${lastSeq}`;
+      },
+    ),
   );
 
   results.push(
-    await runTest("C5: every added has matching done at same index", async () => {
-      const stream = await client.responses.create({
-        model: args.model,
-        input: "Reply with 'ok'.",
-        stream: true,
-      });
-      const added = new Map<number, string>();
-      const done = new Map<number, string>();
-      for await (const ev of stream) {
-        if (ev.type === "response.output_item.added") {
-          added.set(ev.output_index, (ev.item as { type: string }).type);
-        } else if (ev.type === "response.output_item.done") {
-          done.set(ev.output_index, (ev.item as { type: string }).type);
+    await runTest(
+      "C5: every added has matching done at same index",
+      async () => {
+        const stream = await client.responses.create({
+          model: args.model,
+          input: "Reply with 'ok'.",
+          stream: true,
+        });
+        const added = new Map<number, string>();
+        const done = new Map<number, string>();
+        for await (const ev of stream) {
+          if (ev.type === "response.output_item.added") {
+            added.set(ev.output_index, (ev.item as { type: string }).type);
+          } else if (ev.type === "response.output_item.done") {
+            done.set(ev.output_index, (ev.item as { type: string }).type);
+          }
         }
-      }
-      const final = await stream.finalResponse();
-      for (const [idx, type] of added.entries()) {
-        assert(
-          done.get(idx) === type,
-          `index ${idx}: added=${type}, done=${done.get(idx)}`,
-        );
-      }
-      for (let i = 0; i < final.output.length; i++) {
-        const itemType = (final.output[i] as { type: string }).type;
-        assert(
-          added.get(i) === itemType,
-          `final.output[${i}]=${itemType} but event at index ${i}=${added.get(i)}`,
-        );
-      }
-      return `items=${final.output.length} indices=${added.size}`;
-    }),
+        const final = await stream.finalResponse();
+        for (const [idx, type] of added.entries()) {
+          assert(
+            done.get(idx) === type,
+            `index ${idx}: added=${type}, done=${done.get(idx)}`,
+          );
+        }
+        for (let i = 0; i < final.output.length; i++) {
+          const itemType = (final.output[i] as { type: string }).type;
+          assert(
+            added.get(i) === itemType,
+            `final.output[${i}]=${itemType} but event at index ${i}=${added.get(i)}`,
+          );
+        }
+        return `items=${final.output.length} indices=${added.size}`;
+      },
+    ),
   );
 
   results.push(
@@ -354,75 +368,87 @@ async function main(args: Args): Promise<number> {
       );
       assert(fc, `no function_call item in output (status=${resp.status})`);
       assert(fc.name === "get_weather", `wrong tool: ${fc.name}`);
-      assert(fc.call_id && fc.call_id.length > 0, "function_call has no call_id");
+      assert(
+        fc.call_id && fc.call_id.length > 0,
+        "function_call has no call_id",
+      );
       return `name=${fc.name} args=${truncate(fc.arguments ?? "", 40)}`;
     }),
   );
 
   results.push(
-    await runTest("D2: tool roundtrip — continuation produces final answer", async () => {
-      // Turn 1: model asks for the tool.
-      const turn1 = await client.responses.create({
-        model: args.model,
-        input: "What's the weather in Tokyo? Use the tool.",
-        tools: [
-          {
-            type: "function",
-            name: "get_weather",
-            description: "Get current weather for a city.",
-            parameters: {
-              type: "object",
-              properties: { city: { type: "string" } },
-              required: ["city"],
+    await runTest(
+      "D2: tool roundtrip — continuation produces final answer",
+      async () => {
+        // Turn 1: model asks for the tool.
+        const turn1 = await client.responses.create({
+          model: args.model,
+          input: "What's the weather in Tokyo? Use the tool.",
+          tools: [
+            {
+              type: "function",
+              name: "get_weather",
+              description: "Get current weather for a city.",
+              parameters: {
+                type: "object",
+                properties: { city: { type: "string" } },
+                required: ["city"],
+              },
             },
-          },
-        ],
-        tool_choice: "auto",
-      });
-      const fc = turn1.output.find(
-        (o): o is Extract<typeof o, { type: "function_call" }> =>
-          (o as { type: string }).type === "function_call",
-      );
-      if (!fc) return "skip — model didn't call the tool";
-      // Turn 2: feed the tool result back. Include the original function_call
-      // (a valid InputItem) plus the function_call_output. We deliberately
-      // omit other items from turn1.output since OutputMessageItem isn't an
-      // InputItem.
-      const turn2 = await client.responses.create({
-        model: args.model,
-        input: [
-          fc,
-          {
-            type: "function_call_output",
-            call_id: fc.call_id,
-            output: JSON.stringify({ city: "Tokyo", temp_c: 22, sky: "clear" }),
-          },
-        ],
-        tools: [
-          {
-            type: "function",
-            name: "get_weather",
-            description: "Get current weather for a city.",
-            parameters: {
-              type: "object",
-              properties: { city: { type: "string" } },
-              required: ["city"],
+          ],
+          tool_choice: "auto",
+        });
+        const fc = turn1.output.find(
+          (o): o is Extract<typeof o, { type: "function_call" }> =>
+            (o as { type: string }).type === "function_call",
+        );
+        if (!fc) return "skip — model didn't call the tool";
+        // Turn 2: feed the tool result back. Include the original function_call
+        // (a valid InputItem) plus the function_call_output. We deliberately
+        // omit other items from turn1.output since OutputMessageItem isn't an
+        // InputItem.
+        const turn2 = await client.responses.create({
+          model: args.model,
+          input: [
+            fc,
+            {
+              type: "function_call_output",
+              call_id: fc.call_id,
+              output: JSON.stringify({
+                city: "Tokyo",
+                temp_c: 22,
+                sky: "clear",
+              }),
             },
-          },
-        ],
-      });
-      assert(turn2.status === "completed", `turn2 status=${turn2.status}`);
-      assert(
-        (turn2.output_text ?? "").length > 0,
-        "final answer empty after tool result",
-      );
-      const text = (turn2.output_text ?? "").toLowerCase();
-      assert(
-        text.includes("22") || text.includes("clear") || text.includes("tokyo"),
-        `final answer doesn't reference tool output: ${truncate(turn2.output_text ?? "", 80)}`,
-      );
-      return `text=${truncate(turn2.output_text ?? "", 60)}`;
-    }),
+          ],
+          tools: [
+            {
+              type: "function",
+              name: "get_weather",
+              description: "Get current weather for a city.",
+              parameters: {
+                type: "object",
+                properties: { city: { type: "string" } },
+                required: ["city"],
+              },
+            },
+          ],
+        });
+        assert(turn2.status === "completed", `turn2 status=${turn2.status}`);
+        assert(
+          (turn2.output_text ?? "").length > 0,
+          "final answer empty after tool result",
+        );
+        const text = (turn2.output_text ?? "").toLowerCase();
+        assert(
+          text.includes("22") ||
+            text.includes("clear") ||
+            text.includes("tokyo"),
+          `final answer doesn't reference tool output: ${truncate(turn2.output_text ?? "", 80)}`,
+        );
+        return `text=${truncate(turn2.output_text ?? "", 60)}`;
+      },
+    ),
   );
 
   // === E. Conversations (needs store) ====================================
@@ -618,27 +644,31 @@ async function main(args: Args): Promise<number> {
     );
 
     results.push(
-      await runTest("G2: /responses pass-through stream — typed events", async () => {
-        const stream = await client.responses.create({
-          model: args.model,
-          input: "Reply with 'ok'.",
-          stream: true,
-        });
-        const types = new Set<string>();
-        let untyped = 0;
-        for await (const ev of stream) {
-          const t = (ev as StreamEvent).type;
-          if (typeof t !== "string" || t.length === 0) untyped++;
-          else types.add(t);
-        }
-        await stream.finalResponse();
-        assert(untyped === 0, `${untyped} events had no type`);
-        assert(
-          types.has("response.completed") || types.has("response.output_item.done"),
-          `did not see completion event — saw: ${[...types].join(",")}`,
-        );
-        return `types=${types.size}`;
-      }),
+      await runTest(
+        "G2: /responses pass-through stream — typed events",
+        async () => {
+          const stream = await client.responses.create({
+            model: args.model,
+            input: "Reply with 'ok'.",
+            stream: true,
+          });
+          const types = new Set<string>();
+          let untyped = 0;
+          for await (const ev of stream) {
+            const t = (ev as StreamEvent).type;
+            if (typeof t !== "string" || t.length === 0) untyped++;
+            else types.add(t);
+          }
+          await stream.finalResponse();
+          assert(untyped === 0, `${untyped} events had no type`);
+          assert(
+            types.has("response.completed") ||
+              types.has("response.output_item.done"),
+            `did not see completion event — saw: ${[...types].join(",")}`,
+          );
+          return `types=${types.size}`;
+        },
+      ),
     );
   }
 
@@ -660,7 +690,8 @@ async function main(args: Args): Promise<number> {
       await runTest("H1: reasoning model index alignment", async () => {
         const stream = await client.responses.create({
           model: args.reasoningModel!,
-          input: "Think step by step, then output only the final number: 17 * 23.",
+          input:
+            "Think step by step, then output only the final number: 17 * 23.",
           stream: true,
         });
         const added = new Map<number, string>();
@@ -673,7 +704,10 @@ async function main(args: Args): Promise<number> {
             added.set(ev.output_index, item.type);
             if (item.type === "reasoning") reasoningCount++;
           } else if (ev.type === "response.output_item.done") {
-            const item = ev.item as { type: string; encrypted_content?: string };
+            const item = ev.item as {
+              type: string;
+              encrypted_content?: string;
+            };
             done.set(ev.output_index, item.type);
             if (item.type === "reasoning" && item.encrypted_content)
               hadEncrypted = true;
@@ -735,6 +769,7 @@ function parseArgs(argv: string[]): Args {
     reasoningModel: get("reasoning-model"),
     storeLocal: get("store-local"),
     responsesEndpoint: hasFlag("responses-endpoint"),
+    ollamaNative: hasFlag("ollama-native"),
   };
 }
 
@@ -765,7 +800,9 @@ async function expectThrow(
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     if (!pattern.test(msg)) {
-      throw new Error(`error message ${JSON.stringify(msg)} does not match ${pattern}`);
+      throw new Error(
+        `error message ${JSON.stringify(msg)} does not match ${pattern}`,
+      );
     }
     return;
   }

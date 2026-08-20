@@ -93,6 +93,7 @@ export class OpenAICompatAdapter implements BackendAdapter {
     req: ChatCompletionRequest,
     signal?: AbortSignal,
   ): Promise<ChatCompletionResponse> {
+    assertNoUrlFileData(req);
     const res = await this.fetch(`${this.baseUrl}/chat/completions`, {
       method: "POST",
       headers: this.headers(),
@@ -110,6 +111,7 @@ export class OpenAICompatAdapter implements BackendAdapter {
     req: ChatCompletionRequest,
     signal?: AbortSignal,
   ): AsyncGenerator<ChatCompletionChunk> {
+    assertNoUrlFileData(req);
     const res = await this.fetch(`${this.baseUrl}/chat/completions`, {
       method: "POST",
       headers: this.headers({ accept: "text/event-stream" }),
@@ -181,6 +183,27 @@ export class OpenAICompatAdapter implements BackendAdapter {
       throw new BackendError(res.status, body);
     }
     return (await res.json()) as EmbeddingsResponse;
+  }
+}
+
+/**
+ * Chat-completions backends behind this adapter take documents as base64
+ * `file_data` or an uploaded `file_id` only — a plain URL in `file_data` is
+ * an OpenRouter file-parser extension (the translator maps
+ * `input_file.file_url` there for `OpenRouterAdapter` to consume).
+ */
+function assertNoUrlFileData(req: ChatCompletionRequest): void {
+  for (const msg of req.messages) {
+    if (!Array.isArray(msg.content)) continue;
+    for (const part of msg.content) {
+      if (part.type !== "file") continue;
+      const data = part.file.file_data;
+      if (data && /^https?:\/\//i.test(data)) {
+        throw new Error(
+          `input_file: this backend takes documents as base64 \`file_data\` or an uploaded \`file_id\`, not a URL ("${data}"). Inline the file as base64 \`file_data\`, upload it and pass \`file_id\`, or use a backend that accepts URLs — source "openRouter", or OpenAI's Responses endpoint via \`endpoint: "responses"\`.`,
+        );
+      }
+    }
   }
 }
 

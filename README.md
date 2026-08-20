@@ -24,6 +24,51 @@ state without any provider credentials.
 npm i responses-to-completions
 ```
 
+## Migrating from 0.3
+
+0.4.0 replaces the constructor's `backend`/`store` instances with
+`source`/`config` plus `store`/`store_client`/`store_config` — the client now
+builds adapters and stores itself. A 0.3.x construction and its 0.4.0
+equivalent:
+
+```ts
+// 0.3.x
+new ResponsesClient({
+  backend: new OpenAICompatAdapter({
+    baseUrl: "https://api.openai.com/v1",
+    apiKey: process.env.OPENAI_API_KEY,
+  }),
+  store: new LocalFileStore("./.data"),
+});
+
+// 0.4.0
+new ResponsesClient({
+  source: "openAI",
+  config: { apiKey: process.env.OPENAI_API_KEY },
+  store: true,
+  store_client: "local",
+  store_config: { dir: "./.data" },
+});
+```
+
+| 0.3.x | 0.4.0 |
+| --- | --- |
+| `backend: new OpenAICompatAdapter({ apiKey })` | `source: "openAI", config: { apiKey }` |
+| `backend: new OpenAICompatAdapter({ baseUrl })` — vLLM, llama.cpp, … | `source: "openAI", config: { baseUrl, maxTokensParam: "max_tokens" }` |
+| `backend: new OpenRouterAdapter({ apiKey })` | `source: "openRouter", config: { apiKey }` |
+| `backend: new OllamaAdapter({ host })` | `source: "ollama", config: { host, api: "native" }` |
+| `store: new LocalFileStore(dir)` | `store: true, store_client: "local", store_config: { dir }` |
+| `store: new S3Store({ bucket })` | `store: true, store_client: "S3", store_config: { bucket }` |
+| no store | omit `store` (or `store: false`) |
+| custom `BackendAdapter` | subclass `createBackend()`, or drive `AgentLoop` directly |
+
+Behavior changes to know about: `source: "openRouter"` — and `"openAI"`
+without a custom `baseUrl` — now requires `config.apiKey` at construction;
+`source: "ollama"` defaults to Ollama's OpenAI-compatible `/v1` route
+(`api: "native"` restores the old NDJSON adapter); and the new
+`store_client: "openAI"` persists conversations in OpenAI's Conversations API
+(available only for `source: "openAI"` with no custom `baseUrl`).
+
 ## Quick start
 
 ```ts
@@ -69,6 +114,56 @@ for await (const ev of stream) {
 const finalResp = await stream.finalResponse();
 console.log("\nfinal id:", finalResp.id);
 ```
+
+`finalResponse()` resolves after the turn is persisted and is where store
+failures surface. The final stream event arrives *before* the store write
+lands, so start follow-up turns on the same conversation (or read the turn
+back) after `finalResponse()`, not inside the event loop.
+
+### File and image inputs
+
+`input_file` and `input_image` parts ride in a user message's content array:
+
+```ts
+const resp = await client.responses.create({
+  model: "gpt-4o",
+  input: [
+    {
+      type: "message",
+      role: "user",
+      content: [
+        { type: "input_text", text: "Summarize this document." },
+        {
+          type: "input_file",
+          filename: "contract.pdf",
+          file_data: "data:application/pdf;base64,JVBERi0x...",
+        },
+      ],
+    },
+  ],
+  stream: false,
+});
+```
+
+How a document may be carried depends on the backend serving the turn:
+
+| Carrier | `openAI` on chat-completions (default) | `openRouter` | `endpoint: "responses"` |
+| --- | --- | --- | --- |
+| `file_data` — base64 data URI | ✓ | ✓ | ✓ |
+| `file_id` — an uploaded file | ✓ | — | ✓ |
+| `file_url` — a plain URL | ✗ | ✓ (file-parser) | ✓ |
+
+A `file_url` headed for a chat-completions server that only takes base64 is
+rejected up front with an error naming the working alternatives, rather than
+surfacing as an opaque upstream 400. Images use `input_image` with an
+`image_url` (https or data URI) and an optional `detail`.
+
+### Service tier
+
+`service_tier` on a request is forwarded to the backend, and the response
+reports the tier that actually served the turn — providers may downgrade
+(e.g. `priority` past OpenAI's ramp rate limit). When the backend doesn't
+report one, the requested tier is kept on the response.
 
 ## Backends
 
@@ -198,10 +293,15 @@ The types follow the values:
   `config` without a `source` is rejected, since there would be nothing to
   configure. OpenRouter's routing keys (`provider`, `usageAccounting`,
   `appTitle`, `siteUrl`) are accepted on `openRouter` and rejected on the
-  others; `ollama` gets `host` and `api`. Every source takes `apiKey`,
+  others; `ollama` gets `host` and `api`. Most sources take `apiKey`,
   `baseUrl`, `headers`, `fetch`, `forceModel`, `endpoint` and
-  `maxTokensParam`. Keys are camelCase throughout — one spelling per key.
-  `openAI` and `openRouter` require a key.
+  `maxTokensParam`, with two exceptions the types enforce: `openRouter` has
+  no `maxTokensParam` (its adapter always sends `max_tokens`), and ollama's
+  `api: "native"` mode drops `apiKey`/`baseUrl`/`endpoint`/`maxTokensParam`.
+  Config keys are camelCase — one spelling per key — while the top-level
+  store options (`store_client`, `store_config`) are snake_case.
+  `openRouter` always requires a key; `openAI` requires one unless a custom
+  `baseUrl` points it at a keyless OpenAI-compatible server.
 - **`source` may be omitted for a store-only client.** See
   [Store-only clients](#store-only-clients).
 - **`baseUrl` and `maxTokensParam` travel together.** Each source defaults
@@ -210,15 +310,19 @@ The types follow the values:
   [Other OpenAI-compatible servers](#other-openai-compatible-servers).
 - **`store_client` is typed by `store` and by `source`.** It is only accepted
   with `store: true`. `"S3"` and `"local"` work for every source; `"openAI"`
-  only when `source` is `"openAI"` — the OpenAI Conversations store ships
-  every read and write to api.openai.com, so other providers' traffic must
-  not use it. Without `store`, `conversations.*` and `responses.{get,del}`
-  throw and `responses.create` runs stateless.
+  only when `source` is `"openAI"` **without a custom `baseUrl`** — the OpenAI
+  Conversations store ships every read and write to api.openai.com, so other
+  providers' traffic must not use it, and a custom `baseUrl` names a compat
+  server that has no Conversations API (both rejected at the type level and
+  at construction). Without `store`, `conversations.*` and
+  `responses.{get,del}` throw and `responses.create` runs stateless.
 - **`store_config` is typed by `store_client`.** S3 requires a `bucket` (plus
   optional `prefix`, `client`, `clientConfig`); `"local"` requires a `dir`;
   the OpenAI store takes an optional
   `apiKey`/`baseUrl`/`headers`/`fetch`/`pageSize` and otherwise reuses the
-  credentials already in `config`.
+  credentials already in `config` — except `baseUrl`, which is never
+  inherited: conversations always go to api.openai.com unless
+  `store_config.baseUrl` overrides it.
 
 ```ts
 const client = new ResponsesClient({

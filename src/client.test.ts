@@ -18,17 +18,20 @@ describe("client construction", () => {
         body: init?.body ? JSON.parse(init.body) : undefined,
         headers: init?.headers,
       });
-      const payload =
-        json ?? {
-          id: "chatcmpl-1",
-          object: "chat.completion",
-          created: 1,
-          model: "m",
-          choices: [
-            { index: 0, message: { role: "assistant", content: "ok" }, finish_reason: "stop" },
-          ],
-          usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
-        };
+      const payload = json ?? {
+        id: "chatcmpl-1",
+        object: "chat.completion",
+        created: 1,
+        model: "m",
+        choices: [
+          {
+            index: 0,
+            message: { role: "assistant", content: "ok" },
+            finish_reason: "stop",
+          },
+        ],
+        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+      };
       // One body, read either way — a real Response never disagrees with
       // itself between .json() and .text().
       return {
@@ -62,7 +65,11 @@ describe("client construction", () => {
     const calls: any[] = [];
     const client = new ResponsesClient({
       source: "ollama",
-      config: { baseUrl: "http://ollama.internal/v1", apiKey: "k", fetch: capture(calls) },
+      config: {
+        baseUrl: "http://ollama.internal/v1",
+        apiKey: "k",
+        fetch: capture(calls),
+      },
     });
 
     await client.responses.create({ model: "m", input: "hi", stream: false });
@@ -78,7 +85,11 @@ describe("client construction", () => {
       config: { host: "http://localhost:11434", fetch: capture(calls) },
     });
 
-    await client.responses.create({ model: "qwen3", input: "hi", stream: false });
+    await client.responses.create({
+      model: "qwen3",
+      input: "hi",
+      stream: false,
+    });
 
     expect(calls[0].url).toBe("http://localhost:11434/v1/chat/completions");
   });
@@ -90,7 +101,11 @@ describe("client construction", () => {
       config: { host: "http://ollama.internal/v1/", fetch: capture(calls) },
     });
 
-    await client.responses.create({ model: "qwen3", input: "hi", stream: false });
+    await client.responses.create({
+      model: "qwen3",
+      input: "hi",
+      stream: false,
+    });
 
     expect(calls[0].url).toBe("http://ollama.internal/v1/chat/completions");
   });
@@ -106,12 +121,16 @@ describe("client construction", () => {
       },
     });
 
-    await client.responses.create({ model: "qwen3", input: "hi", stream: false });
+    await client.responses.create({
+      model: "qwen3",
+      input: "hi",
+      stream: false,
+    });
 
     expect(calls[0].url).toBe("http://explicit/v1/chat/completions");
   });
 
-  it("builds the native NDJSON adapter on api: \"native\"", async () => {
+  it('builds the native NDJSON adapter on api: "native"', async () => {
     const calls: any[] = [];
     const nativeFetch = (async (url: any, init: any) => {
       calls.push({ url: String(url), body: JSON.parse(init.body) });
@@ -132,7 +151,11 @@ describe("client construction", () => {
 
     const client = new ResponsesClient({
       source: "ollama",
-      config: { api: "native", host: "http://localhost:11434", fetch: nativeFetch },
+      config: {
+        api: "native",
+        host: "http://localhost:11434",
+        fetch: nativeFetch,
+      },
     });
 
     const resp = await client.responses.create({
@@ -160,7 +183,10 @@ describe("client construction", () => {
     await client.responses.create({ model: "m", input: "hi", stream: false });
 
     expect(calls[0].url).toBe("https://openrouter.ai/api/v1/chat/completions");
-    expect(calls[0].body.provider).toEqual({ order: ["Anthropic"], allow_fallbacks: false });
+    expect(calls[0].body.provider).toEqual({
+      order: ["Anthropic"],
+      allow_fallbacks: false,
+    });
     expect(calls[0].headers["x-title"]).toBe("app");
   });
 
@@ -201,7 +227,11 @@ describe("client construction", () => {
   it("says so when the backend has no embeddings support", async () => {
     class NoEmbeddings extends ResponsesClient {
       protected override createBackend(): BackendAdapter {
-        return { name: "bare", mode: "completions", complete: async () => ({}) as any };
+        return {
+          name: "bare",
+          mode: "completions",
+          complete: async () => ({}) as any,
+        };
       }
     }
     const client = new NoEmbeddings({ source: "ollama", config: {} });
@@ -215,7 +245,10 @@ describe("client construction", () => {
     const calls: any[] = [];
     const client = new ResponsesClient({
       source: "openAI",
-      config: { apiKey: "sk-a", fetch: capture(calls, { id: "conv_1", object: "conversation" }) },
+      config: {
+        apiKey: "sk-a",
+        fetch: capture(calls, { id: "conv_1", object: "conversation" }),
+      },
       store: true,
       store_client: "openAI",
     });
@@ -355,7 +388,8 @@ describe("client construction", () => {
       chunk({ role: "assistant", content: "ok" }, null) +
       chunk({}, "stop") +
       "data: [DONE]\n\n";
-    return (async () => new Response(sse, { status: 200 })) as unknown as typeof fetch;
+    return (async () =>
+      new Response(sse, { status: 200 })) as unknown as typeof fetch;
   };
 
   it("keeps a completed turn when the store refuses the write", async () => {
@@ -363,7 +397,12 @@ describe("client construction", () => {
     const client = clientWithStore(brokenStore("appendItems", boom));
 
     const err = await client.responses
-      .create({ model: "m", input: "hi", conversation: "conv_mem", stream: false })
+      .create({
+        model: "m",
+        input: "hi",
+        conversation: "conv_mem",
+        stream: false,
+      })
       .then(
         () => null,
         (e) => e,
@@ -405,7 +444,10 @@ describe("client construction", () => {
 
   it("delivers the stream in full before a store failure is reported", async () => {
     const boom = new Error("S3 503");
-    const client = clientWithStore(brokenStore("saveResponse", boom), sseFetch());
+    const client = clientWithStore(
+      brokenStore("saveResponse", boom),
+      sseFetch(),
+    );
 
     const stream = await client.responses.create({
       model: "m",
@@ -458,7 +500,9 @@ describe("client construction", () => {
       config: { baseUrl: "http://o/v1" },
     });
 
-    await expect(client.conversations.create()).rejects.toThrow(/requires a store/);
+    await expect(client.conversations.create()).rejects.toThrow(
+      /requires a store/,
+    );
   });
 
   it("serves conversation CRUD store-only, with no source or credentials", async () => {
@@ -548,9 +592,60 @@ describe("client construction", () => {
     expect(() => new ResponsesClient({ source: "openAI", config: {} })).toThrow(
       /source "openAI" requires `config.apiKey`/,
     );
-    expect(() => new ResponsesClient({ source: "openRouter", config: {} })).toThrow(
-      /source "openRouter" requires `config.apiKey`/,
-    );
+    expect(
+      () => new ResponsesClient({ source: "openRouter", config: {} }),
+    ).toThrow(/source "openRouter" requires `config.apiKey`/);
+    // A custom baseUrl is the documented route to keyless OpenAI-compatible
+    // servers, so the key requirement lifts there — but not for openRouter.
+    expect(
+      () =>
+        new ResponsesClient({
+          source: "openAI",
+          config: { baseUrl: "http://localhost:8000/v1" },
+        }),
+    ).not.toThrow();
+    expect(
+      () =>
+        new ResponsesClient({
+          source: "openRouter",
+          config: { baseUrl: "http://gateway.internal/v1" } as any,
+        }),
+    ).toThrow(/source "openRouter" requires `config.apiKey`/);
+  });
+
+  it("refuses the openAI store next to a custom baseUrl", () => {
+    // The type rejects this pairing (see the compile-time block below); the
+    // runtime guard catches JS callers.
+    expect(
+      () =>
+        new ResponsesClient({
+          source: "openAI",
+          config: {
+            apiKey: "sk-a",
+            // A generic OpenAI-compatible server — no Conversations API.
+            baseUrl: "http://vllm.internal:8000/v1",
+          },
+          store: true,
+          store_client: "openAI",
+        } as any),
+    ).toThrow(/not available with a custom `config.baseUrl`/);
+  });
+
+  it("reaches a keyless server without an authorization header", async () => {
+    const calls: any[] = [];
+    const client = new ResponsesClient({
+      source: "openAI",
+      config: {
+        baseUrl: "http://localhost:8000/v1",
+        maxTokensParam: "max_tokens",
+        fetch: capture(calls),
+      },
+    });
+
+    await client.responses.create({ model: "m", input: "hi", stream: false });
+
+    expect(calls[0].url).toBe("http://localhost:8000/v1/chat/completions");
+    expect(calls[0].headers).not.toHaveProperty("authorization");
   });
 
   it("lets a subclass override how the backend is built", async () => {
@@ -568,9 +663,17 @@ describe("client construction", () => {
               created: 1,
               model: req.model,
               choices: [
-                { index: 0, message: { role: "assistant", content: "x" }, finish_reason: "stop" },
+                {
+                  index: 0,
+                  message: { role: "assistant", content: "x" },
+                  finish_reason: "stop",
+                },
               ],
-              usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+              usage: {
+                prompt_tokens: 1,
+                completion_tokens: 1,
+                total_tokens: 2,
+              },
             };
           },
         };
@@ -623,26 +726,60 @@ describe("option typing (compile-time)", () => {
       store: true,
       store_client: "openAI",
     });
+    // A compat server (custom baseUrl) can persist to S3/local, just not to
+    // OpenAI's store.
+    accepts({
+      source: "openAI",
+      config: { apiKey: "k", baseUrl: "http://vllm:8000/v1" },
+      store: true,
+      store_client: "S3",
+      store_config: { bucket: "b" },
+    });
     expect(true).toBe(true);
   });
 
   it("rejects mismatched config and store combinations", () => {
-    // @ts-expect-error — `provider` is an openRouter-only key.
-    accepts({ source: "openAI", config: { apiKey: "k", provider: { sort: "price" } } });
+    accepts({
+      source: "openAI",
+      // @ts-expect-error — `provider` is an openRouter-only key.
+      config: { apiKey: "k", provider: { sort: "price" } },
+    });
     // @ts-expect-error — store_client is not accepted without `store: true`.
     accepts({ source: "openAI", config: { apiKey: "k" }, store_client: "S3" });
     // @ts-expect-error — the "openAI" store client requires source "openAI".
-    accepts({ source: "ollama", config: {}, store: true, store_client: "openAI" });
+    accepts({
+      source: "ollama",
+      config: {},
+      store: true,
+      store_client: "openAI",
+    });
+    // @ts-expect-error — a custom baseUrl names a compat server with no Conversations API, so the "openAI" store is rejected.
+    accepts({
+      source: "openAI",
+      config: { apiKey: "k", baseUrl: "http://vllm:8000/v1" },
+      store: true,
+      store_client: "openAI",
+    });
     // @ts-expect-error — S3 needs `store_config.bucket`.
     accepts({ source: "ollama", config: {}, store: true, store_client: "S3" });
     // @ts-expect-error — the local store needs `store_config.dir`.
-    accepts({ source: "ollama", config: {}, store: true, store_client: "local" });
+    accepts({
+      source: "ollama",
+      config: {},
+      store: true,
+      store_client: "local",
+    });
     // @ts-expect-error — openAI's config is required.
     accepts({ source: "openAI" });
     // @ts-expect-error — a named source always requires its config, ollama included.
     accepts({ source: "ollama" });
     // @ts-expect-error — `config` without a `source` has nothing to configure.
-    accepts({ config: { apiKey: "k" }, store: true, store_client: "S3", store_config: { bucket: "b" } });
+    accepts({
+      config: { apiKey: "k" },
+      store: true,
+      store_client: "S3",
+      store_config: { bucket: "b" },
+    });
     // @ts-expect-error — neither a source nor a store: every method would throw.
     accepts({});
     // @ts-expect-error — a store-only client needs a real store, not `store: false`.
@@ -657,12 +794,21 @@ describe("option typing (compile-time)", () => {
     accepts({ source: "openAI", config: { api_key: "k" } });
     // @ts-expect-error — snake_case keys are not accepted; the config is camelCase.
     accepts({ source: "ollama", config: { base_url: "http://o/v1" } });
-    // @ts-expect-error — OpenRouterAdapter has no maxTokensParam option.
-    accepts({ source: "openRouter", config: { apiKey: "k", maxTokensParam: "max_tokens" } });
+    accepts({
+      source: "openRouter",
+      // @ts-expect-error — OpenRouterAdapter has no maxTokensParam option.
+      config: { apiKey: "k", maxTokensParam: "max_tokens" },
+    });
     // @ts-expect-error — OpenAICompatAdapter has no provider-routing option.
-    accepts({ source: "openAI", config: { apiKey: "k", usageAccounting: true } });
-    // @ts-expect-error — native ollama has no baseUrl; it is addressed by host.
-    accepts({ source: "ollama", config: { api: "native", baseUrl: "http://o/v1" } });
+    accepts({
+      source: "openAI",
+      config: { apiKey: "k", usageAccounting: true },
+    });
+    accepts({
+      source: "ollama",
+      // @ts-expect-error — native ollama has no baseUrl; it is addressed by host.
+      config: { api: "native", baseUrl: "http://o/v1" },
+    });
     // @ts-expect-error — unknown source.
     accepts({ source: "anthropic", config: {} });
     expect(true).toBe(true);
@@ -720,7 +866,11 @@ describe("native /responses turns keep the provider's id", () => {
     const calls: any[] = [];
     const client = new ResponsesClient({
       source: "openAI",
-      config: { apiKey: "sk-a", endpoint: "responses", fetch: openAIFetch(calls) },
+      config: {
+        apiKey: "sk-a",
+        endpoint: "responses",
+        fetch: openAIFetch(calls),
+      },
       store: true,
       store_client: "openAI",
     });
@@ -735,11 +885,131 @@ describe("native /responses turns keep the provider's id", () => {
     expect(calls[0].url).toBe("https://api.openai.com/v1/responses");
   });
 
+  it("keeps the upstream terminal status instead of stamping completed", async () => {
+    const fetchMock = (async () =>
+      new Response(
+        JSON.stringify({
+          id: "resp_up",
+          object: "response",
+          created_at: 1,
+          status: "incomplete",
+          incomplete_details: { reason: "max_output_tokens" },
+          model: "m",
+          output: [],
+          usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+        }),
+        { status: 200 },
+      )) as unknown as typeof fetch;
+    const client = new ResponsesClient({
+      source: "openAI",
+      config: { apiKey: "sk-a", endpoint: "responses", fetch: fetchMock },
+    });
+
+    const resp = await client.responses.create({
+      model: "m",
+      input: "hi",
+      stream: false,
+    });
+
+    expect(resp.status).toBe("incomplete");
+    expect(resp.incomplete_details).toEqual({ reason: "max_output_tokens" });
+  });
+
+  it("throws on an upstream failed response even without an error object", async () => {
+    const fetchMock = (async () =>
+      new Response(
+        JSON.stringify({
+          id: "resp_up",
+          object: "response",
+          created_at: 1,
+          status: "failed",
+          error: null,
+          model: "m",
+          output: [],
+        }),
+        { status: 200 },
+      )) as unknown as typeof fetch;
+    const client = new ResponsesClient({
+      source: "openAI",
+      config: { apiKey: "sk-a", endpoint: "responses", fetch: fetchMock },
+    });
+
+    await expect(
+      client.responses.create({ model: "m", input: "hi", stream: false }),
+    ).rejects.toThrow(/Upstream \/responses failed/);
+  });
+
+  // Fix: OpenAI store getResponse read-through has no test — nor did
+  // input_file on the native /responses passthrough.
+  it("passes input_file parts through to /responses untouched", async () => {
+    const calls: any[] = [];
+    const client = new ResponsesClient({
+      source: "openAI",
+      config: {
+        apiKey: "sk-a",
+        endpoint: "responses",
+        fetch: openAIFetch(calls),
+      },
+    });
+
+    await client.responses.create({
+      model: "m",
+      input: [
+        {
+          type: "message",
+          role: "user",
+          content: [
+            { type: "input_text", text: "Summarize this." },
+            {
+              type: "input_file",
+              file_url: "https://cdn.example/contract.pdf",
+            },
+          ],
+        },
+      ],
+      stream: false,
+    });
+
+    // No translation on this path: file_url is a native /responses field.
+    expect(calls[0].body.input[0].content[1]).toEqual({
+      type: "input_file",
+      file_url: "https://cdn.example/contract.pdf",
+    });
+  });
+
+  it("forwards an explicit store opt-out to the upstream /responses body", async () => {
+    const calls: any[] = [];
+    const client = new ResponsesClient({
+      source: "openAI",
+      config: {
+        apiKey: "sk-a",
+        endpoint: "responses",
+        fetch: openAIFetch(calls),
+      },
+    });
+
+    await client.responses.create({
+      model: "m",
+      input: "hi",
+      store: false,
+      stream: false,
+    });
+    // Without the caller's opt-out, the provider's own default applies.
+    await client.responses.create({ model: "m", input: "hi", stream: false });
+
+    expect(calls[0].body.store).toBe(false);
+    expect(calls[1].body).not.toHaveProperty("store");
+  });
+
   it("resolves previous_response_id through the openAI store", async () => {
     const calls: any[] = [];
     const client = new ResponsesClient({
       source: "openAI",
-      config: { apiKey: "sk-a", endpoint: "responses", fetch: openAIFetch(calls) },
+      config: {
+        apiKey: "sk-a",
+        endpoint: "responses",
+        fetch: openAIFetch(calls),
+      },
       store: true,
       store_client: "openAI",
     });
@@ -757,9 +1027,11 @@ describe("native /responses turns keep the provider's id", () => {
     });
 
     // The prior turn was fetched back from OpenAI and folded into the input.
-    expect(calls.some((c) => c.method === "GET" && c.url.endsWith(`/responses/${first.id}`))).toBe(
-      true,
-    );
+    expect(
+      calls.some(
+        (c) => c.method === "GET" && c.url.endsWith(`/responses/${first.id}`),
+      ),
+    ).toBe(true);
     const lastPost = calls.filter((c) => c.method === "POST").at(-1);
     expect(JSON.stringify(lastPost.body.input)).toContain("ok");
     expect(second.id).toBe("resp_upstream_1");
@@ -770,7 +1042,11 @@ describe("native /responses turns keep the provider's id", () => {
       `event: response.created\ndata: ${JSON.stringify({
         type: "response.created",
         sequence_number: 0,
-        response: { id: "resp_upstream_stream", object: "response", status: "in_progress" },
+        response: {
+          id: "resp_upstream_stream",
+          object: "response",
+          status: "in_progress",
+        },
       })}\n\n`,
       `event: response.output_text.delta\ndata: ${JSON.stringify({
         type: "response.output_text.delta",
@@ -799,11 +1075,16 @@ describe("native /responses turns keep the provider's id", () => {
       config: {
         apiKey: "sk-a",
         endpoint: "responses",
-        fetch: (async () => new Response(sse, { status: 200 })) as unknown as typeof fetch,
+        fetch: (async () =>
+          new Response(sse, { status: 200 })) as unknown as typeof fetch,
       },
     });
 
-    const stream = await client.responses.create({ model: "m", input: "hi", stream: true });
+    const stream = await client.responses.create({
+      model: "m",
+      input: "hi",
+      stream: true,
+    });
     const events: any[] = [];
     for await (const ev of stream) events.push(ev);
     const final = await stream.finalResponse();
@@ -813,8 +1094,81 @@ describe("native /responses turns keep the provider's id", () => {
     expect(events[1].type).toBe("response.in_progress");
     expect(final.id).toBe("resp_upstream_stream");
     // One id for the whole stream, lifecycle events included.
-    const ids = new Set(events.filter((e) => e.response).map((e) => e.response.id));
+    const ids = new Set(
+      events.filter((e) => e.response).map((e) => e.response.id),
+    );
     expect([...ids]).toEqual(["resp_upstream_stream"]);
+  });
+
+  it("ends the stream with response.incomplete when the upstream turn was truncated", async () => {
+    const sse = [
+      `event: response.created\ndata: ${JSON.stringify({
+        type: "response.created",
+        sequence_number: 0,
+        response: {
+          id: "resp_up_trunc",
+          object: "response",
+          status: "in_progress",
+        },
+      })}\n\n`,
+      `event: response.output_text.delta\ndata: ${JSON.stringify({
+        type: "response.output_text.delta",
+        sequence_number: 1,
+        item_id: "msg_1",
+        output_index: 0,
+        content_index: 0,
+        delta: "ok",
+      })}\n\n`,
+      `event: response.incomplete\ndata: ${JSON.stringify({
+        type: "response.incomplete",
+        sequence_number: 2,
+        response: {
+          id: "resp_up_trunc",
+          object: "response",
+          status: "incomplete",
+          incomplete_details: { reason: "max_output_tokens" },
+          output: [],
+          usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+        },
+      })}\n\n`,
+      "data: [DONE]\n\n",
+    ].join("");
+
+    const client = new ResponsesClient({
+      source: "openAI",
+      config: {
+        apiKey: "sk-a",
+        endpoint: "responses",
+        fetch: (async () =>
+          new Response(sse, { status: 200 })) as unknown as typeof fetch,
+      },
+    });
+
+    const stream = await client.responses.create({
+      model: "m",
+      input: "hi",
+      stream: true,
+    });
+    const events: any[] = [];
+    for await (const ev of stream) events.push(ev);
+    const final = await stream.finalResponse();
+
+    // Exactly one terminal event, and it is response.incomplete.
+    const terminal = events.filter((e) =>
+      ["response.completed", "response.incomplete", "response.failed"].includes(
+        e.type,
+      ),
+    );
+    expect(terminal.map((e) => e.type)).toEqual(["response.incomplete"]);
+    expect(terminal[0].response.status).toBe("incomplete");
+    expect(final.status).toBe("incomplete");
+    expect(final.incomplete_details).toEqual({ reason: "max_output_tokens" });
+    // Usage arrives on the incomplete event and must still be harvested.
+    expect(final.usage).toEqual({
+      input_tokens: 1,
+      output_tokens: 1,
+      total_tokens: 2,
+    });
   });
 
   it("explains an unresolvable previous_response_id on a read-through store", async () => {
@@ -823,7 +1177,10 @@ describe("native /responses turns keep the provider's id", () => {
       // Default endpoint: the turn is synthesized here, so OpenAI never saw it.
       config: {
         apiKey: "sk-a",
-        fetch: (async () => new Response("not found", { status: 404 })) as unknown as typeof fetch,
+        fetch: (async () =>
+          new Response("not found", {
+            status: 404,
+          })) as unknown as typeof fetch,
       },
       store: true,
       store_client: "openAI",

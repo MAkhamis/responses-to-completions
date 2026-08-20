@@ -220,7 +220,7 @@ describe("responses pass-through request building", () => {
     },
   });
 
-  it("strips signal/conversation/store and keeps service_tier + reasoning", async () => {
+  it("strips signal/conversation, forwards store, keeps service_tier + reasoning", async () => {
     const captured: CreateResponseRequest[] = [];
     const agent = new AgentLoop({ backend: passthroughBackend(captured) });
 
@@ -243,7 +243,7 @@ describe("responses pass-through request building", () => {
     const body = captured[0] as unknown as Record<string, unknown>;
     expect(body).not.toHaveProperty("signal");
     expect(body).not.toHaveProperty("conversation");
-    expect(body).not.toHaveProperty("store");
+    expect(body.store).toBe(true);
     expect(body).not.toHaveProperty("previous_response_id");
     expect(body.service_tier).toBe("priority");
     expect(body.reasoning).toEqual({ effort: "medium", summary: "auto" });

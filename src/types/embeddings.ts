@@ -9,7 +9,7 @@ export interface EmbeddingsRequest {
   /**
    * Input to embed. Pass a string for a single embedding, an array of strings
    */
-  input: string | string[]
+  input: string | string[];
   /**
    * Encoding format for returned vectors. Default `"float"`.
    * `"base64"` is more compact on the wire but requires client-side decoding.

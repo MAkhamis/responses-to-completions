@@ -93,14 +93,10 @@ function pushItem(
     const content = messageContentToChatContent(m.content);
     const role = m.role === "developer" ? "system" : m.role;
     if (role === "tool") return pendingEncrypted; // handled via function_call_output
-    // Multimodal (image) parts are only valid on user messages in the
-    // chat-completions schema; flatten to text for other roles.
     const safeContent =
       typeof content === "string" || role === "user"
         ? content
-        : content
-            .map((p) => (p.type === "text" ? p.text : ""))
-            .join("");
+        : content.map((p) => (p.type === "text" ? p.text : "")).join("");
     const msg: ChatMessage = {
       role: role as "system" | "user" | "assistant",
       content: safeContent,
@@ -182,7 +178,11 @@ function messageContentToChatContent(
         text: (c as { refusal?: string }).refusal ?? "",
       });
     } else if (type === "input_image") {
-      const img = c as { image_url?: string; detail?: "auto" | "low" | "high" };
+      const img = c as {
+        image_url?: string;
+        file_id?: string;
+        detail?: "auto" | "low" | "high";
+      };
       if (img.image_url) {
         hasNonText = true;
         parts.push({
@@ -192,6 +192,10 @@ function messageContentToChatContent(
             ...(img.detail ? { detail: img.detail } : {}),
           },
         });
+      } else if (img.file_id) {
+        throw new Error(
+          'input_image: chat-completions backends take images by `image_url` (https or data URI) — `file_id` cannot be forwarded. Inline the image as a data URI, or use OpenAI\'s Responses endpoint (`endpoint: "responses"`).',
+        );
       }
     } else if (type === "input_file") {
       const f = c as {
@@ -200,9 +204,10 @@ function messageContentToChatContent(
         file_data?: string;
         filename?: string;
       };
-      // Chat-completions carries documents in `file.file_data` (base64 for
-      // OpenAI; OpenRouter's file-parser also accepts a plain URL) or by
-      // `file_id`. A part with neither has nothing to send — skip it.
+      // Chat-completions carries documents in `file.file_data` (base64) or by
+      // `file_id`; a plain URL in `file_data` is an OpenRouter file-parser
+      // extension, and OpenAICompatAdapter rejects it before sending. A part
+      // with neither has nothing to send — skip it.
       const fileData = f.file_data ?? f.file_url;
       if (fileData || f.file_id) {
         hasNonText = true;

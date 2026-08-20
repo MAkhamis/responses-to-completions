@@ -44,7 +44,11 @@ describe("itemsToMessages content translation", () => {
         type: "message",
         role: "user",
         content: [
-          { type: "input_image", image_url: "https://cdn.example/a.jpg", detail: "high" },
+          {
+            type: "input_image",
+            image_url: "https://cdn.example/a.jpg",
+            detail: "high",
+          },
         ],
       },
     ];
@@ -72,7 +76,9 @@ describe("itemsToMessages content translation", () => {
     expect(msgs).toEqual([{ role: "system", content: "instructions" }]);
   });
 
-  it("skips input_image parts without a url", () => {
+  // Fix: input_image with only file_id is silently dropped — the request must
+  // fail loudly rather than go out without the image.
+  it("throws on an input_image carried only by file_id", () => {
     const input: InputItem[] = [
       {
         type: "message",
@@ -83,8 +89,9 @@ describe("itemsToMessages content translation", () => {
         ],
       },
     ];
-    const msgs = itemsToMessages([], input, undefined);
-    expect(msgs).toEqual([{ role: "user", content: "just text" }]);
+    expect(() => itemsToMessages([], input, undefined)).toThrow(
+      /`file_id` cannot be forwarded/,
+    );
   });
 
   it("keeps input_file parts on user messages as chat file parts", () => {
@@ -205,7 +212,9 @@ describe("itemsToMessages encrypted reasoning replay", () => {
       id: "msg_1",
       role: "assistant" as const,
       status: "completed" as const,
-      content: [{ type: "output_text" as const, text: "hello", annotations: [] }],
+      content: [
+        { type: "output_text" as const, text: "hello", annotations: [] },
+      ],
     },
   ];
 

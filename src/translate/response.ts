@@ -113,6 +113,14 @@ function messageContentToText(c: unknown): string {
     .join("");
 }
 
+function numericDetails(details: object): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const [k, v] of Object.entries(details)) {
+    if (typeof v === "number") out[k] = v;
+  }
+  return out;
+}
+
 export function translateUsage(u?: ChatCompletionUsage): Usage | null {
   if (!u) return null;
   return {
@@ -124,7 +132,7 @@ export function translateUsage(u?: ChatCompletionUsage): Usage | null {
     ...(u.prompt_tokens_details
       ? {
           input_tokens_details: {
-            ...u.prompt_tokens_details,
+            ...numericDetails(u.prompt_tokens_details),
             cached_tokens: u.prompt_tokens_details.cached_tokens ?? 0,
           },
         }
@@ -132,7 +140,7 @@ export function translateUsage(u?: ChatCompletionUsage): Usage | null {
     ...(u.completion_tokens_details
       ? {
           output_tokens_details: {
-            ...u.completion_tokens_details,
+            ...numericDetails(u.completion_tokens_details),
             reasoning_tokens: u.completion_tokens_details.reasoning_tokens ?? 0,
           },
         }

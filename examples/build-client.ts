@@ -11,6 +11,8 @@ export interface ClientArgs {
   storeLocal?: string;
   /** Call the upstream `/responses` endpoint instead of `/chat/completions`. */
   responsesEndpoint?: boolean;
+  /** Drive Ollama's native NDJSON `/api/chat` route instead of its `/v1`. */
+  ollamaNative?: boolean;
 }
 
 /**
@@ -31,12 +33,29 @@ export function clientOptions(args: ClientArgs): ResponsesClientOptions {
     : ({ store: false } as const);
 
   if (args.backend === "ollama") {
+    // Ollama serves /v1/chat/completions but no /v1/responses, so forwarding
+    // the flag would 404 every request (see src/backend/from-source.ts).
+    if (args.responsesEndpoint) {
+      throw new Error(
+        "--responses-endpoint is not supported for ollama — it has no /v1/responses route",
+      );
+    }
+    // `--ollama-native` maps to `api: "native"`, the NDJSON /api/chat route.
+    if (args.ollamaNative) {
+      return {
+        source: "ollama",
+        config: {
+          api: "native",
+          ...(args.baseUrl ? { host: args.baseUrl } : {}),
+        },
+        ...store,
+      };
+    }
     return {
       source: "ollama",
       config: {
         ...(args.baseUrl ? { host: args.baseUrl } : {}),
         ...(args.apiKey ? { apiKey: args.apiKey } : {}),
-        ...endpoint,
       },
       ...store,
     };
@@ -55,12 +74,20 @@ export function clientOptions(args: ClientArgs): ResponsesClientOptions {
     };
   }
 
-  if (!args.apiKey) throw new Error("--api-key is required for openai-compat");
+  // The flag names an OpenAI-compatible server, so the target must be
+  // explicit: silently defaulting to api.openai.com would send the prompt
+  // (and key) to the wrong backend. Reaching OpenAI itself is
+  // `--base-url https://api.openai.com/v1`. The key is optional — keyless
+  // local servers (vLLM, llama.cpp, …) take none, and OpenAI rejects keyless
+  // requests on its own.
+  if (!args.baseUrl) {
+    throw new Error("--base-url is required for openai-compat");
+  }
   return {
     source: "openAI",
     config: {
-      apiKey: args.apiKey,
-      ...(args.baseUrl ? { baseUrl: args.baseUrl } : {}),
+      ...(args.apiKey ? { apiKey: args.apiKey } : {}),
+      baseUrl: args.baseUrl,
       ...endpoint,
     },
     ...store,

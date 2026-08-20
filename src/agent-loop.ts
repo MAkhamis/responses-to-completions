@@ -19,6 +19,7 @@ import type {
   McpToolDef,
   OutputItem,
   ResponseObject,
+  ResponseStatus,
   ToolDef,
   Usage,
 } from "./types/responses.js";
@@ -104,14 +105,17 @@ export class AgentLoop {
         usage = mergeUsage(usage, translateUsage(resp.usage));
         servedTier = resp.service_tier ?? servedTier;
 
-        const { items: newItems, outputText: _ } =
-          completionToOutputItems(resp, ctx.request.model);
+        const { items: newItems, outputText: _ } = completionToOutputItems(
+          resp,
+          ctx.request.model,
+        );
         producedItems.push(...newItems);
 
         const pendingFcs = newItems.filter(
           (it): it is FunctionCallItem => it.type === "function_call",
         );
-        if (pendingFcs.length === 0) return { items: producedItems, usage, serviceTier: servedTier };
+        if (pendingFcs.length === 0)
+          return { items: producedItems, usage, serviceTier: servedTier };
 
         // Split tool calls into MCP (server-executed) vs client function tools.
         const { mcpCalls, clientCalls } = classifyCalls(
@@ -262,13 +266,15 @@ export class AgentLoop {
         const pendingFcs = stepResult.items.filter(
           (it): it is FunctionCallItem => it.type === "function_call",
         );
-        if (pendingFcs.length === 0) return { items: producedItems, usage, serviceTier: servedTier };
+        if (pendingFcs.length === 0)
+          return { items: producedItems, usage, serviceTier: servedTier };
 
         const { mcpCalls, clientCalls } = classifyCalls(
           pendingFcs,
           mcpSetup.toolToServer,
         );
-        if (clientCalls.length > 0) return { items: producedItems, usage, serviceTier: servedTier };
+        if (clientCalls.length > 0)
+          return { items: producedItems, usage, serviceTier: servedTier };
 
         const toolMessages: ChatMessage[] = [];
         for (const fc of mcpCalls) {
@@ -335,8 +341,10 @@ export class AgentLoop {
     }
     const upstreamReq = buildResponsesPassthrough(ctx, false);
     const resp = await backend.respond(upstreamReq, ctx.signal);
-    if (resp.status === "failed" && resp.error) {
-      throw new Error(`Upstream /responses failed: ${resp.error.message}`);
+    if (resp.status === "failed") {
+      throw new Error(
+        `Upstream /responses failed: ${resp.error?.message ?? "(no error reported)"}`,
+      );
     }
     if (resp.id) ctx.onUpstreamResponseId?.(resp.id);
     return {
@@ -344,6 +352,8 @@ export class AgentLoop {
       usage: resp.usage,
       serviceTier: resp.service_tier ?? null,
       upstreamResponseId: resp.id ?? null,
+      status: resp.status,
+      incompleteDetails: resp.incomplete_details ?? null,
     };
   }
 
@@ -351,10 +361,10 @@ export class AgentLoop {
    * Streaming pass-through for adapters whose `mode === "responses"`.
    * Forwards upstream `StreamEvent`s out unchanged with one exception: we
    * swallow the upstream-emitted lifecycle events (`response.created`,
-   * `response.in_progress`, `response.completed`, `response.failed`) because
-   * the `StreamResponse` wrapper in the SDK client emits its own with the
-   * SDK-side id and conversation. Items + usage are accumulated from
-   * `response.output_item.done` and `response.completed`.
+   * `response.in_progress`, `response.completed`, `response.incomplete`,
+   * `response.failed`) because the `StreamResponse` wrapper in the SDK client
+   * emits its own with the SDK-side id and conversation. Items + usage are
+   * accumulated from `response.output_item.done` and the terminal event.
    */
   private async *streamViaResponses(
     ctx: AgentRunContext,
@@ -370,6 +380,8 @@ export class AgentLoop {
     let usage: Usage | null = null;
     let servedTier: string | null = null;
     let upstreamId: string | null = null;
+    let status: ResponseStatus | undefined;
+    let incompleteDetails: { reason: string } | null = null;
     let seq = 0;
 
     /**
@@ -386,12 +398,17 @@ export class AgentLoop {
 
     for await (const ev of backend.respondStream(upstreamReq, ctx.signal)) {
       noteId((ev as { response?: ResponseObject }).response?.id);
-      if (ev.type === "response.completed") {
+      if (
+        ev.type === "response.completed" ||
+        ev.type === "response.incomplete"
+      ) {
         if (ev.response.output?.length) {
           items.splice(0, items.length, ...ev.response.output);
         }
         if (ev.response.usage) usage = ev.response.usage;
         servedTier = ev.response.service_tier ?? servedTier;
+        status = ev.type === "response.incomplete" ? "incomplete" : "completed";
+        incompleteDetails = ev.response.incomplete_details ?? null;
         continue;
       }
       if (ev.type === "response.failed") {
@@ -415,6 +432,7 @@ export class AgentLoop {
       usage,
       serviceTier: servedTier,
       upstreamResponseId: upstreamId,
+      ...(status ? { status, incompleteDetails } : {}),
     };
   }
 
@@ -579,6 +597,15 @@ export interface AgentRunResult {
    * and only a store that persists responses can retrieve them.
    */
   upstreamResponseId?: string | null;
+  /**
+   * The terminal status a native `/responses` backend reported — e.g.
+   * `"incomplete"` when `max_output_tokens` truncated the turn. Unset for
+   * `mode: "completions"` runs, whose turns complete or throw; the client
+   * treats unset as `"completed"`.
+   */
+  status?: ResponseStatus;
+  /** Why the turn ended `"incomplete"`, verbatim from the backend. */
+  incompleteDetails?: { reason: string } | null;
 }
 
 interface ResolvedMcpServer {
@@ -762,9 +789,7 @@ function mergeCostDetails(
   );
   return {
     ...(upstream !== undefined ? { upstream_inference_cost: upstream } : {}),
-    ...(prompt !== undefined
-      ? { upstream_inference_prompt_cost: prompt }
-      : {}),
+    ...(prompt !== undefined ? { upstream_inference_prompt_cost: prompt } : {}),
     ...(completions !== undefined
       ? { upstream_inference_completions_cost: completions }
       : {}),
@@ -814,12 +839,17 @@ function buildResponsesPassthrough(
   const {
     conversation: _c,
     previous_response_id: _p,
-    store: _s,
+    store,
     stream: _st,
     signal: _sig,
     ...rest
   } = ctx.request as CreateResponseRequest & { signal?: AbortSignal };
-  return { ...rest, input: inputItems, stream };
+  return {
+    ...rest,
+    input: inputItems,
+    stream,
+    ...(store !== undefined ? { store } : {}),
+  };
 }
 
 function combineHistoryAndInput(

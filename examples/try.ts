@@ -1,31 +1,21 @@
-import { ResponsesClient, StorePersistenceError } from "./src/client.js";
-import type { Store } from "./src/store/store.js";
-import type { StreamEvent } from "./src/translate/stream.js";
+import { ResponsesClient, StorePersistenceError } from "../src/client.js";
+import type { Store } from "../src/store/store.js";
+import type { StreamEvent } from "../src/translate/stream.js";
 
 /**
- * Run with: npx tsx test.ts
+ * Fix: Live-API runner test.ts sits at repo root beside npm test — moved to
+ * examples/try.ts so its name no longer reads like part of the unit suite.
+ *
+ * Manual demo runner: hits the live provider with real credentials and real
+ * billing. Run with: npm run try (tsx --env-file=.env examples/try.ts).
  * Needs OPENAI_API_KEY in the environment.
  */
 
 const AIClient = new ResponsesClient({
-  source: "openAI",
-  config: {
-    // An empty key throws at construction — the source needs real credentials.
-    apiKey: process.env.BACKEND_API_KEY ?? process.env.OPENAI_API_KEY!,
-    endpoint: "responses",
-  },
   store: true,
-  store_client: "S3",
-  store_config: {
-    bucket: process.env.STORE_S3_BUCKET as string,
-    clientConfig: {
-      region: process.env.STORE_S3_REGION,
-      credentials: {
-        accessKeyId: process.env.STORE_S3_ACCESS_KEY_ID as string,
-        secretAccessKey: process.env.STORE_S3_SECRET_ACCESS_KEY as string,
-      },
-    },
-  },
+  store_client: "openAI",
+  config: { apiKey: process.env.OPENAI_API_KEY! },
+  source: "openAI",
 });
 
 // 1. Plain call — `input` is a string, the reply is on `output_text`.
@@ -66,7 +56,7 @@ async function multiTurn() {
     stream: false,
   });
 
-  console.log(result.output_text); 
+  console.log(result.output_text);
 }
 
 // 4. Streaming — `stream: true` returns an async-iterable, not a response.
@@ -264,7 +254,9 @@ async function storeFailureKeepsTheTurn() {
 
     // Completed, not failed — nothing went wrong with the response itself.
     if (err.response.status !== "completed") {
-      throw new Error(`expected status "completed", got "${err.response.status}"`);
+      throw new Error(
+        `expected status "completed", got "${err.response.status}"`,
+      );
     }
     if (!err.response.output_text) {
       throw new Error("the completed turn came back with no output");
@@ -298,7 +290,9 @@ async function storeFailureKeepsTheTurn() {
 
   // The consumer was told the turn completed, because on the wire it did.
   if (types.at(-1) !== "response.completed") {
-    throw new Error(`expected the stream to end on completed, got ${types.at(-1)}`);
+    throw new Error(
+      `expected the stream to end on completed, got ${types.at(-1)}`,
+    );
   }
   if (types.includes("response.failed")) {
     throw new Error("a delivered turn was restated as failed");
@@ -316,7 +310,13 @@ async function storeFailureKeepsTheTurn() {
   console.log("streaming:");
   console.log("  events:  ", events.length);
   for (const event of events) {
-    console.log("   ", event.sequence_number, event.type, " : ", event.type == "response.output_text.delta" ? event.delta : null );
+    console.log(
+      "   ",
+      event.sequence_number,
+      event.type,
+      " : ",
+      event.type == "response.output_text.delta" ? event.delta : null,
+    );
   }
   console.log("  rejected:", rejection.message);
 

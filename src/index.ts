@@ -16,7 +16,11 @@ export {
 } from "./client.js";
 
 // Lower-level building blocks for advanced users who want to bypass the client.
-export { AgentLoop, type AgentRunContext, type AgentRunResult } from "./agent-loop.js";
+export {
+  AgentLoop,
+  type AgentRunContext,
+  type AgentRunResult,
+} from "./agent-loop.js";
 export { resolveHistory, type ResolvedHistory } from "./history.js";
 
 // Backends
@@ -75,5 +79,8 @@ export {
   translateToolChoice,
   translateResponseFormat,
 } from "./translate/request.js";
-export { completionToOutputItems, translateUsage } from "./translate/response.js";
+export {
+  completionToOutputItems,
+  translateUsage,
+} from "./translate/response.js";
 export { translateChunkStream, type StreamEvent } from "./translate/stream.js";

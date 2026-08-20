@@ -10,9 +10,13 @@ export interface OpenAIConversationStoreOptions {
   /**
    * Page size used when reading a whole conversation. `listItems` with no
    * explicit limit pages until exhaustion, so this only tunes round-trips.
+   * Clamped to OpenAI's accepted 1-100 range.
    */
   pageSize?: number;
 }
+
+const MAX_ITEMS_PER_CALL = 20;
+const MAX_LIST_PAGES = 1000;
 
 export class OpenAIStoreError extends Error {
   constructor(
@@ -84,11 +88,13 @@ export class OpenAIConversationStore implements Store {
     body?: unknown,
     /** Treat 404 as "absent" and return null rather than throwing. */
     nullOn404 = false,
+    signal?: AbortSignal,
   ): Promise<T | null> {
     const res = await this.fetch(`${this.baseUrl}${path}`, {
       method,
       headers: this.headers(),
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+      signal,
     });
     if (!res.ok) {
       if (nullOn404 && res.status === 404) return null;
@@ -101,11 +107,14 @@ export class OpenAIConversationStore implements Store {
   }
 
   // ---- conversations ----
-  async createConversation(input: {
-    id?: string;
-    metadata?: Record<string, string> | null;
-    items?: ConversationItem[];
-  }): Promise<ConversationObject> {
+  async createConversation(
+    input: {
+      id?: string;
+      metadata?: Record<string, string> | null;
+      items?: ConversationItem[];
+    },
+    signal?: AbortSignal,
+  ): Promise<ConversationObject> {
     // OpenAI issues the id; a caller-supplied one cannot be honored, and
     // silently returning a different id would strand the caller's reference.
     if (input.id) {
@@ -113,25 +122,39 @@ export class OpenAIConversationStore implements Store {
         "OpenAIConversationStore: OpenAI assigns conversation ids — cannot create with a caller-supplied `id`.",
       );
     }
+    const items = input.items ?? [];
+    const first = items.slice(0, MAX_ITEMS_PER_CALL);
     const created = await this.call<ConversationObject>(
       "POST",
       "/conversations",
       {
         ...(input.metadata ? { metadata: input.metadata } : {}),
-        ...(input.items?.length
-          ? { items: input.items.map(stripServerFields) }
-          : {}),
+        ...(first.length ? { items: first.map(stripServerFields) } : {}),
       },
+      false,
+      signal,
     );
-    return created as ConversationObject;
+    const conversation = created as ConversationObject;
+    if (items.length > MAX_ITEMS_PER_CALL) {
+      await this.appendItems(
+        conversation.id,
+        items.slice(MAX_ITEMS_PER_CALL),
+        signal,
+      );
+    }
+    return conversation;
   }
 
-  async getConversation(id: string): Promise<ConversationObject | null> {
+  async getConversation(
+    id: string,
+    signal?: AbortSignal,
+  ): Promise<ConversationObject | null> {
     return this.call<ConversationObject>(
       "GET",
       `/conversations/${encodeURIComponent(id)}`,
       undefined,
       true,
+      signal,
     );
   }
 
@@ -164,16 +187,25 @@ export class OpenAIConversationStore implements Store {
   async appendItems(
     conversationId: string,
     items: ConversationItem[],
+    signal?: AbortSignal,
   ): Promise<void> {
-    if (items.length === 0) return;
-    await this.call("POST", `/conversations/${encodeURIComponent(conversationId)}/items`, {
-      items: items.map(stripServerFields),
-    });
+    for (let i = 0; i < items.length; i += MAX_ITEMS_PER_CALL) {
+      await this.call(
+        "POST",
+        `/conversations/${encodeURIComponent(conversationId)}/items`,
+        {
+          items: items.slice(i, i + MAX_ITEMS_PER_CALL).map(stripServerFields),
+        },
+        false,
+        signal,
+      );
+    }
   }
 
   async listItems(
     conversationId: string,
     opts?: { limit?: number; after?: string; order?: "asc" | "desc" },
+    signal?: AbortSignal,
   ): Promise<{ items: ConversationItem[]; hasMore: boolean }> {
     const order = opts?.order ?? "asc";
     const base = `/conversations/${encodeURIComponent(conversationId)}/items`;
@@ -182,19 +214,36 @@ export class OpenAIConversationStore implements Store {
     // conversation" — the caller is rebuilding history, and stopping at
     // OpenAI's default page size would silently truncate it.
     if (opts?.limit !== undefined) {
-      const page = await this.fetchPage(base, order, opts.limit, opts.after);
+      const page = await this.fetchPage(
+        base,
+        order,
+        opts.limit,
+        opts.after,
+        signal,
+      );
       return { items: page.items, hasMore: page.hasMore };
     }
 
     const all: ConversationItem[] = [];
     let after = opts?.after;
-    for (;;) {
-      const page = await this.fetchPage(base, order, this.pageSize, after);
+    for (let pages = 0; pages < MAX_LIST_PAGES; pages++) {
+      const page = await this.fetchPage(
+        base,
+        order,
+        this.pageSize,
+        after,
+        signal,
+      );
+      if (after !== undefined && page.lastId === after) {
+        return { items: all, hasMore: false };
+      }
       all.push(...page.items);
-      if (!page.hasMore || !page.lastId) break;
+      if (!page.hasMore || !page.lastId) return { items: all, hasMore: false };
       after = page.lastId;
     }
-    return { items: all, hasMore: false };
+    throw new Error(
+      `OpenAIConversationStore: conversation ${conversationId} exceeded ${MAX_LIST_PAGES} pages while listing items — aborting rather than paging without bound.`,
+    );
   }
 
   private async fetchPage(
@@ -202,18 +251,20 @@ export class OpenAIConversationStore implements Store {
     order: "asc" | "desc",
     limit: number,
     after?: string,
+    signal?: AbortSignal,
   ): Promise<{
     items: ConversationItem[];
     hasMore: boolean;
     lastId: string | null;
   }> {
-    const qs = new URLSearchParams({ order, limit: String(limit) });
+    const clamped = Math.min(100, Math.max(1, Math.trunc(limit)));
+    const qs = new URLSearchParams({ order, limit: String(clamped) });
     if (after) qs.set("after", after);
     const res = await this.call<{
       data?: ConversationItem[];
       has_more?: boolean;
       last_id?: string | null;
-    }>("GET", `${base}?${qs.toString()}`, undefined, true);
+    }>("GET", `${base}?${qs.toString()}`, undefined, true, signal);
     const items = res?.data ?? [];
     return {
       items,
@@ -253,12 +304,16 @@ export class OpenAIConversationStore implements Store {
   /** No-op: OpenAI persists the responses its own endpoint produced. */
   async saveResponse(_resp: ResponseObject): Promise<void> {}
 
-  async getResponse(id: string): Promise<ResponseObject | null> {
+  async getResponse(
+    id: string,
+    signal?: AbortSignal,
+  ): Promise<ResponseObject | null> {
     return this.call<ResponseObject>(
       "GET",
       `/responses/${encodeURIComponent(id)}`,
       undefined,
       true,
+      signal,
     );
   }
 
@@ -273,9 +328,25 @@ export class OpenAIConversationStore implements Store {
   }
 }
 
-/** Ids are OpenAI's to assign; sending ours back is rejected as unknown input. */
 function stripServerFields(item: ConversationItem): ConversationItem {
+  const type = (item as { type?: string }).type;
+
+  if (type === "reasoning") {
+    const { model: _model, ...rest } = item as ConversationItem & {
+      model?: string;
+    };
+    return rest as ConversationItem;
+  }
+
   const { id: _id, ...rest } = item as ConversationItem & { id?: string };
+
+  if (type === "mcp_list_tools") {
+    const { error: _error, ...withoutError } = rest as typeof rest & {
+      error?: string;
+    };
+    return withoutError as ConversationItem;
+  }
+
   return rest as ConversationItem;
 }
 

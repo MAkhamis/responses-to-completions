@@ -95,3 +95,82 @@ describe("OpenAICompatAdapter maxTokensParam", () => {
     expect(bodies[0]).not.toHaveProperty("max_tokens");
   });
 });
+
+describe("OpenAICompatAdapter file input", () => {
+  it("rejects a URL in file.file_data before any request is made", async () => {
+    const bodies: Record<string, unknown>[] = [];
+    const adapter = new OpenAICompatAdapter({
+      baseUrl: "https://api.openai.com/v1",
+      fetch: captureFetch(bodies),
+    });
+
+    await expect(
+      adapter.complete({
+        model: "test-model",
+        messages: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "file",
+                file: { file_data: "https://cdn.example/contract.pdf" },
+              },
+            ],
+          },
+        ],
+      }),
+    ).rejects.toThrow(/base64 `file_data`/);
+    expect(bodies).toHaveLength(0);
+  });
+
+  it("rejects a URL in file.file_data on the streaming path too", async () => {
+    const bodies: Record<string, unknown>[] = [];
+    const adapter = new OpenAICompatAdapter({
+      baseUrl: "https://api.openai.com/v1",
+      fetch: captureFetch(bodies),
+    });
+
+    const gen = adapter.stream({
+      model: "test-model",
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "file",
+              file: { file_data: "https://cdn.example/contract.pdf" },
+            },
+          ],
+        },
+      ],
+    });
+    await expect(gen.next()).rejects.toThrow(/base64 `file_data`/);
+    expect(bodies).toHaveLength(0);
+  });
+
+  it("passes base64 data-URI file_data and file_id through", async () => {
+    const bodies: Record<string, unknown>[] = [];
+    const adapter = new OpenAICompatAdapter({
+      baseUrl: "https://api.openai.com/v1",
+      fetch: captureFetch(bodies),
+    });
+
+    await adapter.complete({
+      model: "test-model",
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "file",
+              file: { file_data: "data:application/pdf;base64,AAAA" },
+            },
+            { type: "file", file: { file_id: "file-123" } },
+          ],
+        },
+      ],
+    });
+
+    expect(bodies).toHaveLength(1);
+  });
+});

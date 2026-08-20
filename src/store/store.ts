@@ -41,12 +41,22 @@ export interface Store {
   readonly assignsConversationIds?: boolean;
 
   // Conversations
-  createConversation(input: {
-    id?: string;
-    metadata?: Record<string, string> | null;
-    items?: ConversationItem[];
-  }): Promise<ConversationObject>;
-  getConversation(id: string): Promise<ConversationObject | null>;
+  //
+  // The methods on `responses.create`'s critical path take an optional
+  // AbortSignal so a network-backed store can cancel in-flight I/O when the
+  // request is aborted. Stores without cancellable I/O may ignore it.
+  createConversation(
+    input: {
+      id?: string;
+      metadata?: Record<string, string> | null;
+      items?: ConversationItem[];
+    },
+    signal?: AbortSignal,
+  ): Promise<ConversationObject>;
+  getConversation(
+    id: string,
+    signal?: AbortSignal,
+  ): Promise<ConversationObject | null>;
   updateConversation(
     id: string,
     patch: { metadata?: Record<string, string> | null },
@@ -54,19 +64,27 @@ export interface Store {
   deleteConversation(id: string): Promise<{ id: string; deleted: boolean }>;
 
   // Items
-  appendItems(conversationId: string, items: ConversationItem[]): Promise<void>;
+  appendItems(
+    conversationId: string,
+    items: ConversationItem[],
+    signal?: AbortSignal,
+  ): Promise<void>;
   listItems(
     conversationId: string,
     opts?: { limit?: number; after?: string; order?: "asc" | "desc" },
+    signal?: AbortSignal,
   ): Promise<{ items: ConversationItem[]; hasMore: boolean }>;
-  getItem(conversationId: string, itemId: string): Promise<ConversationItem | null>;
+  getItem(
+    conversationId: string,
+    itemId: string,
+  ): Promise<ConversationItem | null>;
   deleteItem(
     conversationId: string,
     itemId: string,
   ): Promise<{ id: string; deleted: boolean }>;
 
   // Responses
-  saveResponse(resp: ResponseObject): Promise<void>;
-  getResponse(id: string): Promise<ResponseObject | null>;
+  saveResponse(resp: ResponseObject, signal?: AbortSignal): Promise<void>;
+  getResponse(id: string, signal?: AbortSignal): Promise<ResponseObject | null>;
   deleteResponse(id: string): Promise<{ id: string; deleted: boolean }>;
 }

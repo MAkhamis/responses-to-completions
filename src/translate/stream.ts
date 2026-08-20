@@ -106,6 +106,11 @@ export type StreamEvent =
       response: ResponseObject;
     }
   | {
+      type: "response.incomplete";
+      sequence_number: number;
+      response: ResponseObject;
+    }
+  | {
       type: "response.failed";
       sequence_number: number;
       response: ResponseObject;

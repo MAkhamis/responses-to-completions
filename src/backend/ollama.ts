@@ -193,7 +193,7 @@ export class OllamaAdapter implements BackendAdapter {
       if (ev.done) return;
     }
   }
-  
+
   async embeddings(
     req: EmbeddingsRequest,
     signal?: AbortSignal,
