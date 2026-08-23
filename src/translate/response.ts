@@ -25,9 +25,12 @@ export function completionToOutputItems(
 ): {
   items: OutputItem[];
   outputText: string;
+  /**
+   */
+  finishReason: string | null;
 } {
   const choice = resp.choices[0];
-  if (!choice) return { items: [], outputText: "" };
+  if (!choice) return { items: [], outputText: "", finishReason: null };
   const msg = choice.message;
   const items: OutputItem[] = [];
   let outputText = "";
@@ -96,7 +99,7 @@ export function completionToOutputItems(
     }
   }
 
-  return { items, outputText };
+  return { items, outputText, finishReason: choice.finish_reason ?? null };
 }
 
 function messageContentToText(c: unknown): string {

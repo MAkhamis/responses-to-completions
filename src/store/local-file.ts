@@ -38,22 +38,23 @@ export class LocalFileStore implements Store {
     const prev = this.locks.get(key) ?? Promise.resolve();
     let release!: () => void;
     const next = new Promise<void>((r) => (release = r));
-    this.locks.set(
-      key,
-      prev.then(() => next),
-    );
+    const mine = prev.then(() => next);
+    this.locks.set(key, mine);
     await prev;
     try {
       return await fn();
     } finally {
       release();
-      if (this.locks.get(key) === prev.then(() => next)) this.locks.delete(key);
+      if (this.locks.get(key) === mine) this.locks.delete(key);
     }
   }
 
-  private async readJson<T>(file: string): Promise<T | null> {
+  private async readJson<T>(
+    file: string,
+    signal?: AbortSignal,
+  ): Promise<T | null> {
     try {
-      const raw = await fs.readFile(file, "utf8");
+      const raw = await fs.readFile(file, { encoding: "utf8", signal });
       return JSON.parse(raw) as T;
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code === "ENOENT") return null;
@@ -61,19 +62,25 @@ export class LocalFileStore implements Store {
     }
   }
 
-  private async writeJson(file: string, data: unknown) {
+  private async writeJson(file: string, data: unknown, signal?: AbortSignal) {
     await this.ensureDir(file);
     const tmp = `${file}.tmp`;
-    await fs.writeFile(tmp, JSON.stringify(data, null, 2), "utf8");
+    await fs.writeFile(tmp, JSON.stringify(data, null, 2), {
+      encoding: "utf8",
+      signal,
+    });
     await fs.rename(tmp, file);
   }
 
   // ---- conversations ----
-  async createConversation(input: {
-    id?: string;
-    metadata?: Record<string, string> | null;
-    items?: ConversationItem[];
-  }): Promise<ConversationObject> {
+  async createConversation(
+    input: {
+      id?: string;
+      metadata?: Record<string, string> | null;
+      items?: ConversationItem[];
+    },
+    signal?: AbortSignal,
+  ): Promise<ConversationObject> {
     const id = input.id ?? genConvId();
     const convo: ConversationObject & { items: ConversationItem[] } = {
       id,
@@ -82,15 +89,18 @@ export class LocalFileStore implements Store {
       metadata: input.metadata ?? null,
       items: input.items ?? [],
     };
-    await this.writeJson(this.convPath(id), convo);
+    await this.writeJson(this.convPath(id), convo, signal);
     const { items: _omit, ...meta } = convo;
     return meta;
   }
 
-  async getConversation(id: string): Promise<ConversationObject | null> {
+  async getConversation(
+    id: string,
+    signal?: AbortSignal,
+  ): Promise<ConversationObject | null> {
     const data = await this.readJson<
       ConversationObject & { items: ConversationItem[] }
-    >(this.convPath(id));
+    >(this.convPath(id), signal);
     if (!data) return null;
     const { items: _omit, ...meta } = data;
     return meta;
@@ -129,25 +139,27 @@ export class LocalFileStore implements Store {
   async appendItems(
     conversationId: string,
     items: ConversationItem[],
+    signal?: AbortSignal,
   ): Promise<void> {
     if (items.length === 0) return;
     await this.withLock(`conv:${conversationId}`, async () => {
       const data = await this.readJson<
         ConversationObject & { items: ConversationItem[] }
-      >(this.convPath(conversationId));
+      >(this.convPath(conversationId), signal);
       if (!data) throw new Error(`Conversation not found: ${conversationId}`);
       data.items.push(...items);
-      await this.writeJson(this.convPath(conversationId), data);
+      await this.writeJson(this.convPath(conversationId), data, signal);
     });
   }
 
   async listItems(
     conversationId: string,
     opts?: { limit?: number; after?: string; order?: "asc" | "desc" },
+    signal?: AbortSignal,
   ): Promise<{ items: ConversationItem[]; hasMore: boolean }> {
     const data = await this.readJson<
       ConversationObject & { items: ConversationItem[] }
-    >(this.convPath(conversationId));
+    >(this.convPath(conversationId), signal);
     if (!data) return { items: [], hasMore: false };
 
     let items = data.items.slice();
@@ -190,12 +202,18 @@ export class LocalFileStore implements Store {
   }
 
   // ---- responses ----
-  async saveResponse(resp: ResponseObject): Promise<void> {
-    await this.writeJson(this.respPath(resp.id), resp);
+  async saveResponse(
+    resp: ResponseObject,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    await this.writeJson(this.respPath(resp.id), resp, signal);
   }
 
-  async getResponse(id: string): Promise<ResponseObject | null> {
-    return this.readJson<ResponseObject>(this.respPath(id));
+  async getResponse(
+    id: string,
+    signal?: AbortSignal,
+  ): Promise<ResponseObject | null> {
+    return this.readJson<ResponseObject>(this.respPath(id), signal);
   }
 
   async deleteResponse(id: string): Promise<{ id: string; deleted: boolean }> {

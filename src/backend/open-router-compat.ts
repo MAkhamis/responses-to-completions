@@ -123,6 +123,7 @@ export class OpenRouterAdapter implements BackendAdapter {
     req: ChatCompletionRequest,
     signal?: AbortSignal,
   ): Promise<ChatCompletionResponse> {
+    assertNoFileId(req);
     const res = await this.fetch(`${this.baseUrl}/chat/completions`, {
       method: "POST",
       headers: this.headers(),
@@ -144,6 +145,7 @@ export class OpenRouterAdapter implements BackendAdapter {
     req: ChatCompletionRequest,
     signal?: AbortSignal,
   ): AsyncGenerator<ChatCompletionChunk> {
+    assertNoFileId(req);
     const res = await this.fetch(`${this.baseUrl}/chat/completions`, {
       method: "POST",
       headers: this.headers({ accept: "text/event-stream" }),
@@ -216,5 +218,27 @@ export class OpenRouterAdapter implements BackendAdapter {
       throw new BackendError(res.status, body);
     }
     return (await res.json()) as EmbeddingsResponse;
+  }
+}
+
+/**
+ * A URL in `file_data` is fine here — that is OpenRouter's file-parser
+ * extension — but `file_id` names an upload hosted by another provider, which
+ * OpenRouter cannot resolve. This adapter is an independent implementation
+ * rather than a subclass of `OpenAICompatAdapter`, so it needs its own check;
+ * without one, forwarding a `file_id` yields the opaque upstream 400 the
+ * sibling adapter's guard exists to replace.
+ */
+function assertNoFileId(req: ChatCompletionRequest): void {
+  for (const msg of req.messages) {
+    if (!Array.isArray(msg.content)) continue;
+    for (const part of msg.content) {
+      if (part.type !== "file") continue;
+      if (part.file.file_id) {
+        throw new Error(
+          `input_file: source "openRouter" cannot resolve \`file_id\` ("${part.file.file_id}") — that names an upload hosted by another provider. Pass the document as base64 \`file_data\`, or as a URL in \`file_url\` for OpenRouter's file parser.`,
+        );
+      }
+    }
   }
 }

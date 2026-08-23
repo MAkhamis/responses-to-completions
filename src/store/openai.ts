@@ -134,7 +134,12 @@ export class OpenAIConversationStore implements Store {
       false,
       signal,
     );
-    const conversation = created as ConversationObject;
+    if (!created?.id) {
+      throw new Error(
+        `OpenAIConversationStore: POST ${this.baseUrl}/conversations succeeded but returned no conversation id — cannot address the conversation. The server answered with an empty or unexpected body.`,
+      );
+    }
+    const conversation = created;
     if (items.length > MAX_ITEMS_PER_CALL) {
       await this.appendItems(
         conversation.id,
@@ -225,6 +230,16 @@ export class OpenAIConversationStore implements Store {
     }
 
     const all: ConversationItem[] = [];
+    // The cursor-advance guard used to return before `all.push(...page.items)`,
+    // so a server that returns genuinely new items while echoing the request
+    // cursor back in `last_id` lost that whole page. The page is now collected
+    // first and the guard runs after, so nothing is dropped — and because it
+    // runs unconditionally, a non-advancing cursor still ends the loop on the
+    // very next check instead of re-requesting the same page.
+    //
+    // Dedup by item id additionally guards against a server that repeats items
+    // across cursors that *do* advance.
+    const seen = new Set<string>();
     let after = opts?.after;
     for (let pages = 0; pages < MAX_LIST_PAGES; pages++) {
       const page = await this.fetchPage(
@@ -234,11 +249,19 @@ export class OpenAIConversationStore implements Store {
         after,
         signal,
       );
-      if (after !== undefined && page.lastId === after) {
-        return { items: all, hasMore: false };
+      for (const item of page.items) {
+        const id = getItemId(item);
+        if (id) {
+          if (seen.has(id)) continue;
+          seen.add(id);
+        }
+        all.push(item);
       }
-      all.push(...page.items);
       if (!page.hasMore || !page.lastId) return { items: all, hasMore: false };
+      // The cursor did not move, so there is no next page to ask for —
+      // requesting it again would return this same page forever. This page's
+      // items are already in `all`.
+      if (page.lastId === after) return { items: all, hasMore: false };
       after = page.lastId;
     }
     throw new Error(

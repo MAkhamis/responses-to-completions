@@ -65,24 +65,16 @@ export function createStoreForClient(
     S3StoreClientConfig | OpenAIStoreClientConfig | LocalStoreClientConfig,
   fallback: StoreCredentialFallback = {},
 ): Store {
+  assertStoreClientConfig(client, config, fallback);
+
   if (client === "local") {
-    const c = config as LocalStoreClientConfig | undefined;
-    if (!c?.dir) {
-      throw new Error(
-        'createStoreForClient: store_client "local" needs `store_config.dir`.',
-      );
-    }
+    const c = config as LocalStoreClientConfig;
     return new LocalFileStore(c.dir);
   }
 
   if (client === "openAI") {
     const c = (config ?? {}) as OpenAIStoreClientConfig;
-    const apiKey = c.apiKey ?? fallback.apiKey;
-    if (!apiKey) {
-      throw new Error(
-        'createStoreForClient: store_client "openAI" needs an API key — pass `store_config.apiKey` or an `apiKey` in the provider config.',
-      );
-    }
+    const apiKey = (c.apiKey ?? fallback.apiKey) as string;
     const baseUrl = c.baseUrl ?? fallback.baseUrl;
     const fetchImpl = c.fetch ?? fallback.fetch;
     const headers =
@@ -98,16 +90,52 @@ export function createStoreForClient(
     });
   }
 
+  const c = config as S3StoreClientConfig;
+  return new LazyStore(async () => {
+    const { S3Store } = await import("./s3.js");
+    return new S3Store(c);
+  });
+}
+
+/**
+ * Validates a `store_client` + `store_config` pairing without building
+ * anything.
+ *
+ * Split out so `ResponsesClient` can keep failing fast on a bad store config
+ * at construction while deferring the actual `createStore()` call to first use
+ * — an override of that hook cannot run safely until the subclass's own fields
+ * are initialized. Both paths share these checks rather than restating them.
+ */
+export function assertStoreClientConfig(
+  client: StoreClient,
+  config?:
+    S3StoreClientConfig | OpenAIStoreClientConfig | LocalStoreClientConfig,
+  fallback: StoreCredentialFallback = {},
+): void {
+  if (client === "local") {
+    const c = config as LocalStoreClientConfig | undefined;
+    if (!c?.dir) {
+      throw new Error(
+        'createStoreForClient: store_client "local" needs `store_config.dir`.',
+      );
+    }
+    return;
+  }
+  if (client === "openAI") {
+    const c = (config ?? {}) as OpenAIStoreClientConfig;
+    if (!(c.apiKey ?? fallback.apiKey)) {
+      throw new Error(
+        'createStoreForClient: store_client "openAI" needs an API key — pass `store_config.apiKey` or an `apiKey` in the provider config.',
+      );
+    }
+    return;
+  }
   const c = config as S3StoreClientConfig | undefined;
   if (!c?.bucket) {
     throw new Error(
       'createStoreForClient: store_client "S3" needs `store_config.bucket`.',
     );
   }
-  return new LazyStore(async () => {
-    const { S3Store } = await import("./s3.js");
-    return new S3Store(c);
-  });
 }
 
 /**

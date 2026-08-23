@@ -76,8 +76,6 @@ describe("itemsToMessages content translation", () => {
     expect(msgs).toEqual([{ role: "system", content: "instructions" }]);
   });
 
-  // Fix: input_image with only file_id is silently dropped — the request must
-  // fail loudly rather than go out without the image.
   it("throws on an input_image carried only by file_id", () => {
     const input: InputItem[] = [
       {

@@ -10,6 +10,7 @@ import {
 } from "./backend/from-source.js";
 import { resolveHistory } from "./history.js";
 import {
+  assertStoreClientConfig,
   createStoreForClient,
   type LocalStoreClientConfig,
   type OpenAIStoreClientConfig,
@@ -158,9 +159,48 @@ export type ResponsesClientOptions =
 export class ResponsesClient {
   /** The source this client serves, or undefined on a store-only client. */
   readonly source: ClientSource | undefined;
-  private readonly backend: BackendAdapter | undefined;
-  private readonly store: Store | undefined;
-  private readonly agent: AgentLoop | undefined;
+
+  private readonly backendSpec:
+    { source: ClientSource; config: ProviderConfig } | undefined;
+  private readonly storeSpec:
+    | {
+        client: StoreClient;
+        config?:
+          | S3StoreClientConfig
+          | LocalStoreClientConfig
+          | OpenAIStoreClientConfig;
+        providerConfig: ProviderConfig;
+      }
+    | undefined;
+  private readonly maxIterations: number | undefined;
+  private backendCache: BackendAdapter | undefined;
+  private storeCache: Store | undefined;
+  private agentCache: AgentLoop | undefined;
+
+  private get backend(): BackendAdapter | undefined {
+    const spec = this.backendSpec;
+    if (!spec) return undefined;
+    return (this.backendCache ??= this.createBackend(spec.source, spec.config));
+  }
+
+  private get store(): Store | undefined {
+    const spec = this.storeSpec;
+    if (!spec) return undefined;
+    return (this.storeCache ??= this.createStore(
+      spec.client,
+      spec.config,
+      spec.providerConfig,
+    ));
+  }
+
+  private get agent(): AgentLoop | undefined {
+    const backend = this.backend;
+    if (!backend) return undefined;
+    return (this.agentCache ??= new AgentLoop({
+      backend,
+      maxIterations: this.maxIterations,
+    }));
+  }
 
   /**
    * The adapter that fits a source — `openAI` → `OpenAICompatAdapter` with
@@ -295,9 +335,10 @@ export class ResponsesClient {
       );
     }
 
+    this.maxIterations = opts.maxIterations;
     if (opts.source) {
       this.source = opts.source;
-      this.backend = this.createBackend(opts.source, config);
+      this.backendSpec = { source: opts.source, config };
     }
 
     if (opts.store) {
@@ -317,18 +358,26 @@ export class ResponsesClient {
           'ResponsesClient: store_client "openAI" is not available with a custom `config.baseUrl` — that names an OpenAI-compatible server, which has no Conversations API. Use store_client "S3" or "local".',
         );
       }
-      this.store = this.createStore(
-        opts.store_client,
-        opts.store_config,
-        config,
-      );
-    }
-
-    if (this.backend) {
-      this.agent = new AgentLoop({
-        backend: this.backend,
-        maxIterations: opts.maxIterations,
-      });
+      // Construction is deferred (see `storeSpec`), but a bad store config is
+      // still a construction-time error — deferring that too would surface a
+      // typo'd bucket on the first request instead of at startup.
+      //
+      // Only for the built-in factory, though: these are `createStoreForClient`'s
+      // requirements, and a subclass that overrides `createStore` builds
+      // something else entirely. Validating unconditionally rejected such a
+      // client at construction over a field its override never reads.
+      if (this.createStore === ResponsesClient.prototype.createStore) {
+        assertStoreClientConfig(opts.store_client, opts.store_config, {
+          apiKey: config.apiKey,
+          headers: config.headers,
+          fetch: config.fetch,
+        });
+      }
+      this.storeSpec = {
+        client: opts.store_client,
+        config: opts.store_config,
+        providerConfig: config,
+      };
     }
 
     const requireStore = (op: string): Store => {
@@ -495,7 +544,9 @@ export class ResponsesClient {
 
     const finalResp: ResponseObject = {
       ...initialResp,
-      id: result.upstreamResponseId ?? initialResp.id,
+      id:
+        (req.store !== false ? result.upstreamResponseId : null) ??
+        initialResp.id,
       status: result.status ?? "completed",
       ...(result.incompleteDetails
         ? { incomplete_details: result.incompleteDetails }
@@ -513,7 +564,6 @@ export class ResponsesClient {
         inputItems,
         outputItems: result.items,
         response: finalResp,
-        signal: req.signal,
       });
     }
     return finalResp;
@@ -568,6 +618,7 @@ export class StreamResponse implements AsyncIterable<StreamEvent> {
   private readonly queue: StreamEvent[] = [];
   private waiters: Array<() => void> = [];
   private producerDone = false;
+  private finalObserved = false;
 
   constructor(deps: StreamResponseDeps) {
     this.deps = deps;
@@ -575,12 +626,36 @@ export class StreamResponse implements AsyncIterable<StreamEvent> {
       this.finalResolve = resolve;
       this.finalReject = reject;
     });
-    this.finalPromise.catch(() => {});
+    // This used to be an unconditional `catch(() => {})`, added to silence
+    // unhandled-rejection warnings — but the terminal event is emitted before
+    // the store write, so a persistence failure reaches only `finalPromise`,
+    // and swallowing it left a consumer that just iterates with no signal at
+    // all: no event, no log, exit code 0, while the turn was never saved. The
+    // emit-before-persist ordering is deliberate and stays; what changes is
+    // that a rejection nobody is waiting for is now reported instead of
+    // dropped. The deferral gives a caller that awaits `finalResponse()`
+    // slightly later than the rejection a chance to claim it first.
+    //
+    // Only post-delivery failures reach this. A failure before the terminal
+    // event is emitted as `response.failed`, which every iterating consumer
+    // already sees, so `produce()` marks those observed — otherwise an upstream
+    // error or a deliberate `AbortSignal` printed this warning on a correctly
+    // handled turn.
+    this.finalPromise.catch((err) => {
+      setTimeout(() => {
+        if (this.finalObserved) return;
+        console.error(
+          "ResponsesClient: a streamed turn was delivered but its result was never observed, and it failed. Await `stream.finalResponse()` to handle this yourself.",
+          err,
+        );
+      }, 0);
+    });
     void this.produce();
   }
 
   /** Resolves with the persisted final response, or rejects on upstream error. */
   finalResponse(): Promise<ResponseObject> {
+    this.finalObserved = true;
     return this.finalPromise;
   }
 
@@ -632,6 +707,10 @@ export class StreamResponse implements AsyncIterable<StreamEvent> {
     let delivered = false;
     let responseId = initialResponse.id;
     let announced = false;
+    // `store` is forwarded to a native `/responses` provider, so with
+    // `store: false` the provider discards the turn — adopting the id it
+    // issued would hand back an id that resolves nowhere.
+    const adoptUpstreamId = request.store !== false;
 
     /**
      * Every event of a stream has to name the same response, and the id isn't
@@ -668,7 +747,7 @@ export class StreamResponse implements AsyncIterable<StreamEvent> {
         history,
         signal,
         onUpstreamResponseId: (id) => {
-          if (!announced) responseId = id;
+          if (!announced && adoptUpstreamId) responseId = id;
         },
       });
       while (true) {
@@ -679,7 +758,7 @@ export class StreamResponse implements AsyncIterable<StreamEvent> {
           servedTier = r.value.serviceTier ?? null;
           status = r.value.status;
           incompleteDetails = r.value.incompleteDetails ?? null;
-          if (!announced && r.value.upstreamResponseId) {
+          if (!announced && adoptUpstreamId && r.value.upstreamResponseId) {
             responseId = r.value.upstreamResponseId;
           }
           break;
@@ -716,7 +795,6 @@ export class StreamResponse implements AsyncIterable<StreamEvent> {
           inputItems,
           outputItems: items,
           response: finalResp,
-          signal,
         });
       }
       this.finalResolve(finalResp);
@@ -740,6 +818,12 @@ export class StreamResponse implements AsyncIterable<StreamEvent> {
         sequence_number: seq++,
         response: failedResp,
       });
+      // The failure is now on the event stream, so it is not an unobserved
+      // one — suppress the constructor's warning for it. Without this, an
+      // upstream error or a caller's own `abort()` printed a spurious
+      // "never observed" error, with a message claiming the turn had been
+      // delivered, at every consumer that handles `response.failed`.
+      this.finalObserved = true;
       this.finalReject(err);
     } finally {
       this.producerDone = true;
@@ -765,25 +849,28 @@ export class StorePersistenceError extends Error {
   }
 }
 
+/**
+ * Writes a produced turn to the store.
+ *
+ * Takes no `AbortSignal` by design: the turn has already been produced and
+ * billed by the time this runs, and cancelling midway commits the conversation
+ * items while dropping the response record, leaving an id that resolves to
+ * nothing. Cancellation belongs on the read path and on work that happens
+ * before the caller is told the turn completed.
+ */
 async function persistTurn(args: {
   store: Store;
   conversationId: string | null;
   inputItems: ConversationItem[];
   outputItems: OutputItem[];
   response: ResponseObject;
-  signal?: AbortSignal;
 }): Promise<void> {
-  const { store, conversationId, inputItems, outputItems, response, signal } =
-    args;
+  const { store, conversationId, inputItems, outputItems, response } = args;
   try {
     if (conversationId) {
-      await store.appendItems(
-        conversationId,
-        [...inputItems, ...outputItems],
-        signal,
-      );
+      await store.appendItems(conversationId, [...inputItems, ...outputItems]);
     }
-    await store.saveResponse(response, signal);
+    await store.saveResponse(response);
   } catch (err) {
     throw new StorePersistenceError(response, err);
   }

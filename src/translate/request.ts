@@ -52,13 +52,39 @@ export function itemsToMessages(
     msgs.push({ role: "system", content: instructions });
   }
 
-  const all: ConversationItem[] = [...history, ...normalizeInput(newInput)];
+  const fresh = normalizeInput(newInput);
+  for (const item of fresh) assertUsableImageParts(item);
+  const all: ConversationItem[] = [...history, ...fresh];
 
   let pendingEncrypted: ReasoningDetail[] | null = null;
   for (const item of all) {
     pendingEncrypted = pushItem(msgs, item, pendingEncrypted, model);
   }
   return msgs;
+}
+
+/**
+ * Rejects an `input_image` the caller just passed that carries only `file_id`,
+ * naming the carriers that do work. Applied to fresh input only, and only on
+ * `role: "user"` — every other role has its content flattened to text, so an
+ * image there was never going to be sent either way.
+ */
+function assertUsableImageParts(item: InputItem): void {
+  const t = (item as { type?: string }).type;
+  if (t && t !== "message") return;
+  const m = item as InputMessageItem;
+  const role = m.role === "developer" ? "system" : m.role;
+  if (role !== "user" || !Array.isArray(m.content)) return;
+  for (const c of m.content) {
+    if (!c || typeof c !== "object") continue;
+    if ((c as { type?: string }).type !== "input_image") continue;
+    const img = c as { image_url?: string; file_id?: string };
+    if (!img.image_url && img.file_id) {
+      throw new Error(
+        'input_image: chat-completions backends take images by `image_url` (https or data URI) — `file_id` cannot be forwarded. Inline the image as a data URI, or use OpenAI\'s Responses endpoint (`endpoint: "responses"`).',
+      );
+    }
+  }
 }
 
 function normalizeInput(input: string | InputItem[] | undefined): InputItem[] {
@@ -192,11 +218,10 @@ function messageContentToChatContent(
             ...(img.detail ? { detail: img.detail } : {}),
           },
         });
-      } else if (img.file_id) {
-        throw new Error(
-          'input_image: chat-completions backends take images by `image_url` (https or data URI) — `file_id` cannot be forwarded. Inline the image as a data URI, or use OpenAI\'s Responses endpoint (`endpoint: "responses"`).',
-        );
       }
+      // A `file_id` with no `image_url` has nothing a chat-completions backend
+      // can fetch, so there is no part to emit. Fresh input never reaches here
+      // — `assertUsableImageParts` rejects it up front with the alternatives.
     } else if (type === "input_file") {
       const f = c as {
         file_id?: string;

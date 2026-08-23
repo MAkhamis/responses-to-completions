@@ -413,7 +413,6 @@ describe("OpenAIConversationStore", () => {
     }
   });
 
-  // Fix: OpenAI store getResponse read-through has no test.
   it("reads a response through from the provider, and 404s as null", async () => {
     const calls: Call[] = [];
     const store = new OpenAIConversationStore({
@@ -439,7 +438,6 @@ describe("OpenAIConversationStore", () => {
     expect(await store.getResponse("resp_missing")).toBeNull();
   });
 
-  // Fix: listItems loop lacks cursor-advance and max-page guards.
   it("stops paging when the cursor fails to advance instead of looping", async () => {
     const calls: Call[] = [];
     const store = new OpenAIConversationStore({

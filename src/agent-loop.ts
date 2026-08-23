@@ -105,17 +105,23 @@ export class AgentLoop {
         usage = mergeUsage(usage, translateUsage(resp.usage));
         servedTier = resp.service_tier ?? servedTier;
 
-        const { items: newItems, outputText: _ } = completionToOutputItems(
-          resp,
-          ctx.request.model,
-        );
+        const {
+          items: newItems,
+          outputText: _,
+          finishReason,
+        } = completionToOutputItems(resp, ctx.request.model);
         producedItems.push(...newItems);
 
         const pendingFcs = newItems.filter(
           (it): it is FunctionCallItem => it.type === "function_call",
         );
         if (pendingFcs.length === 0)
-          return { items: producedItems, usage, serviceTier: servedTier };
+          return {
+            items: producedItems,
+            usage,
+            serviceTier: servedTier,
+            ...terminalStatus(finishReason),
+          };
 
         // Split tool calls into MCP (server-executed) vs client function tools.
         const { mcpCalls, clientCalls } = classifyCalls(
@@ -125,7 +131,12 @@ export class AgentLoop {
         if (clientCalls.length > 0) {
           // Client must execute these; stop and return them as function_call items.
           // (Mixed batches: we still surface the MCP items we already executed.)
-          return { items: producedItems, usage, serviceTier: servedTier };
+          return {
+            items: producedItems,
+            usage,
+            serviceTier: servedTier,
+            ...terminalStatus(finishReason),
+          };
         }
 
         // Execute MCP calls in the order the model requested them.
@@ -140,7 +151,12 @@ export class AgentLoop {
             // Remove the surrogate function_call from produced items (we don't
             // want to expose internal plumbing when pausing for approval).
             removeFunctionCall(producedItems, fc.call_id);
-            return { items: producedItems, usage, serviceTier: servedTier };
+            return {
+              items: producedItems,
+              usage,
+              serviceTier: servedTier,
+              ...terminalStatus(finishReason),
+            };
           }
           producedItems.push(mcpOutcome.item);
           // Remove surrogate function_call: the Responses API surfaces the
@@ -164,7 +180,12 @@ export class AgentLoop {
         ];
       }
 
-      return { items: producedItems, usage, serviceTier: servedTier };
+      return {
+        items: producedItems,
+        usage,
+        serviceTier: servedTier,
+        ...maxIterationsStatus(),
+      };
     } finally {
       await mcpSetup.close();
     }
@@ -231,9 +252,10 @@ export class AgentLoop {
         const chunks = stream.call(backend, req, ctx.signal);
         const snapshot = snapshotResponseFor(ctx, producedItems);
         const gen = translateChunkStream(
-          reindexChunks(chunks, producedItems.length),
+          chunks,
           snapshot,
           seq,
+          producedItems.length,
         );
 
         // Pipe through the translator, collecting items + usage when it finishes.
@@ -241,6 +263,7 @@ export class AgentLoop {
           items: OutputItem[];
           usage: Usage | null;
           serviceTier?: string | null;
+          finishReason?: string | null;
         } = {
           items: [],
           usage: null,
@@ -252,6 +275,7 @@ export class AgentLoop {
               items: OutputItem[];
               usage: Usage | null;
               serviceTier?: string | null;
+              finishReason?: string | null;
             };
             break;
           }
@@ -267,14 +291,24 @@ export class AgentLoop {
           (it): it is FunctionCallItem => it.type === "function_call",
         );
         if (pendingFcs.length === 0)
-          return { items: producedItems, usage, serviceTier: servedTier };
+          return {
+            items: producedItems,
+            usage,
+            serviceTier: servedTier,
+            ...terminalStatus(stepResult.finishReason),
+          };
 
         const { mcpCalls, clientCalls } = classifyCalls(
           pendingFcs,
           mcpSetup.toolToServer,
         );
         if (clientCalls.length > 0)
-          return { items: producedItems, usage, serviceTier: servedTier };
+          return {
+            items: producedItems,
+            usage,
+            serviceTier: servedTier,
+            ...terminalStatus(stepResult.finishReason),
+          };
 
         const toolMessages: ChatMessage[] = [];
         for (const fc of mcpCalls) {
@@ -295,7 +329,12 @@ export class AgentLoop {
             item: outcome.item,
           };
           if (outcome.kind === "approval") {
-            return { items: producedItems, usage, serviceTier: servedTier };
+            return {
+              items: producedItems,
+              usage,
+              serviceTier: servedTier,
+              ...terminalStatus(stepResult.finishReason),
+            };
           }
           toolMessages.push({
             role: "tool",
@@ -314,7 +353,12 @@ export class AgentLoop {
         ];
       }
 
-      return { items: producedItems, usage, serviceTier: servedTier };
+      return {
+        items: producedItems,
+        usage,
+        serviceTier: servedTier,
+        ...maxIterationsStatus(),
+      };
     } finally {
       await mcpSetup.close();
     }
@@ -348,7 +392,7 @@ export class AgentLoop {
     }
     if (resp.id) ctx.onUpstreamResponseId?.(resp.id);
     return {
-      items: resp.output,
+      items: Array.isArray(resp.output) ? resp.output : [],
       usage: resp.usage,
       serviceTier: resp.service_tier ?? null,
       upstreamResponseId: resp.id ?? null,
@@ -416,6 +460,12 @@ export class AgentLoop {
           `Upstream /responses failed: ${ev.response.error?.message ?? "unknown"}`,
         );
       }
+      if ((ev as { type?: string }).type === "error") {
+        const e = ev as unknown as { code?: string; message?: string };
+        throw new Error(
+          `Upstream /responses error: ${e.message ?? e.code ?? "unknown"}`,
+        );
+      }
       if (
         ev.type === "response.created" ||
         ev.type === "response.in_progress"
@@ -427,12 +477,28 @@ export class AgentLoop {
       }
       yield { ...ev, sequence_number: seq++ };
     }
+    // The loop never verified that a terminal event arrived, so a stream that
+    // died mid-flight returned with `status` unset — which the client stamps
+    // `"completed"`, reporting billed, possibly-truncated content as a fully
+    // successful turn.
+    //
+    // Reported as `"incomplete"` rather than thrown: the items already yielded
+    // are real and were paid for, and not every terminal-event-less stream is a
+    // failure — an OpenAI-compatible `/responses` proxy may close the stream
+    // with the chat-completions `[DONE]` sentinel and no `response.completed`.
+    // Throwing discarded a delivered turn in that case; `"incomplete"` claims
+    // no success and keeps the content.
+    if (status === undefined) {
+      status = "incomplete";
+      incompleteDetails = { reason: "interrupted" };
+    }
     return {
       items,
       usage,
       serviceTier: servedTier,
       upstreamResponseId: upstreamId,
-      ...(status ? { status, incompleteDetails } : {}),
+      status,
+      incompleteDetails,
     };
   }
 
@@ -598,10 +664,11 @@ export interface AgentRunResult {
    */
   upstreamResponseId?: string | null;
   /**
-   * The terminal status a native `/responses` backend reported — e.g.
-   * `"incomplete"` when `max_output_tokens` truncated the turn. Unset for
-   * `mode: "completions"` runs, whose turns complete or throw; the client
-   * treats unset as `"completed"`.
+   * The terminal status of the turn — e.g. `"incomplete"` when
+   * `max_output_tokens` truncated it. A native `/responses` backend reports
+   * this directly; for `mode: "completions"` it is derived from the last
+   * turn's `finish_reason` (see {@link terminalStatus}). Unset means the turn
+   * ended normally and the client treats it as `"completed"`.
    */
   status?: ResponseStatus;
   /** Why the turn ended `"incomplete"`, verbatim from the backend. */
@@ -615,6 +682,47 @@ interface ResolvedMcpServer {
 }
 
 // ---- helpers ----
+
+/**
+ * Maps a chat-completions `finish_reason` onto the Responses-API terminal
+ * status. `"stop"`/`"tool_calls"` are ordinary completions; the two capped
+ * reasons become `incomplete` so a caller can tell a model that finished from
+ * one the cap cut off. Without this the completions path — the default one —
+ * reports a truncated turn as fully completed and never emits
+ * `response.incomplete`.
+ */
+function terminalStatus(finishReason: string | null | undefined): {
+  status?: ResponseStatus;
+  incompleteDetails?: { reason: string } | null;
+} {
+  if (finishReason === "length") {
+    return {
+      status: "incomplete",
+      incompleteDetails: { reason: "max_output_tokens" },
+    };
+  }
+  if (finishReason === "content_filter") {
+    return {
+      status: "incomplete",
+      incompleteDetails: { reason: "content_filter" },
+    };
+  }
+  return {};
+}
+
+/**
+ * Exhausting `maxIterations` is the same gap by a second route: the turn stops
+ * with tool calls still pending, which is not a completed response.
+ */
+function maxIterationsStatus(): {
+  status: ResponseStatus;
+  incompleteDetails: { reason: string };
+} {
+  return {
+    status: "incomplete",
+    incompleteDetails: { reason: "max_tool_calls" },
+  };
+}
 
 function collectClientFunctionTools(
   tools: ToolDef[] | undefined,
@@ -834,8 +942,13 @@ function buildResponsesPassthrough(
   stream: boolean,
 ): CreateResponseRequest {
   const inputItems = combineHistoryAndInput(ctx.history, ctx.request.input);
-  // SDK-side keys: state and transport are resolved here, so none of them may
+  // Conversation state and transport are resolved here, so those keys never
   // reach the upstream payload.
+  //
+  // `store` is deliberately NOT one of them — it is the caller's persistence
+  // opt-out and the provider honors it too. The consequence (not adopting the
+  // provider's response id for a turn it was told to discard) is handled at
+  // the adoption site in `client.ts`, not by stripping the key again here.
   const {
     conversation: _c,
     previous_response_id: _p,
@@ -865,20 +978,4 @@ function combineHistoryAndInput(
     }
   }
   return out;
-}
-
-/**
- * Later iterations of the agent loop start numbering their chunks from 0
- * again (since each backend call is a fresh stream), but Responses-API
- * output_index is a monotonic counter across the whole response. The stream
- * translator uses its own local nextOutputIndex; we feed it a positional
- * offset implicitly by treating each iteration as a fresh translator instance
- * and then the caller re-indexes produced items when concatenating. For the
- * event sequence_number we use a single monotonic counter in the outer loop.
- */
-async function* reindexChunks<T>(
-  src: AsyncIterable<T>,
-  _baseIndex: number,
-): AsyncIterable<T> {
-  for await (const x of src) yield x;
 }

@@ -144,12 +144,17 @@ export async function* translateChunkStream(
   chunks: AsyncIterable<ChatCompletionChunk>,
   initialResponse: ResponseObject,
   startSeq = 0,
+  /**
+   */
+  startOutputIndex = 0,
 ): AsyncGenerator<
   StreamEvent,
   {
     items: OutputItem[];
     usage: ReturnType<typeof translateUsage>;
     serviceTier: string | null;
+    /** Terminal `finish_reason` of this turn, for incomplete-status mapping. */
+    finishReason: string | null;
   }
 > {
   let seq = startSeq;
@@ -174,9 +179,10 @@ export async function* translateChunkStream(
   };
   const tools = new Map<number, ToolState>();
 
-  let nextOutputIndex = 0;
+  let nextOutputIndex = startOutputIndex;
   let usage: ChatCompletionUsage | undefined;
   let serviceTier: string | null = null;
+  let finishReason: string | null = null;
 
   const nextSeq = () => seq++;
 
@@ -317,6 +323,7 @@ export async function* translateChunkStream(
 
     // --- finish ---
     if (choice.finish_reason) {
+      finishReason = choice.finish_reason;
       if (reasoningItem) {
         reasoningItem.status = "completed";
         reasoningItem.content = [
@@ -408,5 +415,5 @@ export async function* translateChunkStream(
   for (const state of tools.values()) allItems[state.outputIndex] = state.item;
   const items = allItems.filter((x): x is OutputItem => !!x);
 
-  return { items, usage: translateUsage(usage), serviceTier };
+  return { items, usage: translateUsage(usage), serviceTier, finishReason };
 }

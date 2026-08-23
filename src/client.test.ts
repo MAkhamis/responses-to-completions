@@ -939,8 +939,6 @@ describe("native /responses turns keep the provider's id", () => {
     ).rejects.toThrow(/Upstream \/responses failed/);
   });
 
-  // Fix: OpenAI store getResponse read-through has no test — nor did
-  // input_file on the native /responses passthrough.
   it("passes input_file parts through to /responses untouched", async () => {
     const calls: any[] = [];
     const client = new ResponsesClient({
