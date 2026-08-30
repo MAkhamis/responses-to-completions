@@ -11,15 +11,8 @@
  *     --model gpt-4o-mini \
  *     [--store-local ./.test-data]
  */
-import {
-  LocalFileStore,
-  OllamaAdapter,
-  OpenAICompatAdapter,
-  OpenRouterAdapter,
-  ResponsesClient,
-  type BackendAdapter,
-  type Store,
-} from "../src/index.js";
+import { ResponsesClient } from "../src/index.js";
+import { clientOptions } from "./build-client.js";
 
 export interface Args {
   backend: "openai-compat" | "ollama" | "openrouter";
@@ -27,6 +20,7 @@ export interface Args {
   apiKey?: string;
   model: string;
   storeLocal?: string;
+  ollamaNative?: boolean;
 }
 
 interface TestResult {
@@ -36,12 +30,8 @@ interface TestResult {
 }
 
 export async function main(args: Args): Promise<number> {
-  const backend = buildBackend(args);
-  const store: Store | undefined = args.storeLocal
-    ? new LocalFileStore(args.storeLocal)
-    : undefined;
-
-  const client = new ResponsesClient({ backend, store });
+  const store = args.storeLocal !== undefined;
+  const client = new ResponsesClient(clientOptions(args));
   const model = args.model;
   const results: TestResult[] = [];
 
@@ -212,23 +202,8 @@ export function parseArgs(argv: string[]): Args {
     apiKey: get("api-key"),
     model,
     storeLocal: get("store-local"),
+    ollamaNative: argv.includes("--ollama-native"),
   };
-}
-
-function buildBackend(args: Args): BackendAdapter {
-  if (args.backend === "ollama") {
-    return new OllamaAdapter({ host: args.baseUrl });
-  }
-  if (args.backend === "openrouter") {
-    if (!args.apiKey) throw new Error("--api-key is required for openrouter");
-    return new OpenRouterAdapter({ apiKey: args.apiKey });
-  }
-  if (!args.baseUrl)
-    throw new Error("--base-url is required for openai-compat");
-  return new OpenAICompatAdapter({
-    baseUrl: args.baseUrl,
-    apiKey: args.apiKey,
-  });
 }
 
 async function runTest(
@@ -273,4 +248,3 @@ function printSummary(results: TestResult[]): void {
   console.log("─".repeat(60));
   console.log(`  ${pass} passed, ${fail} failed, ${skip} skipped`);
 }
-

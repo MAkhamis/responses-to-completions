@@ -5,11 +5,7 @@
  */
 
 export type CompletionsRole =
-  | "system"
-  | "developer"
-  | "user"
-  | "assistant"
-  | "tool";
+  "system" | "developer" | "user" | "assistant" | "tool";
 
 export interface TextContentPart {
   type: "text";
@@ -21,7 +17,22 @@ export interface ImageUrlContentPart {
   image_url: { url: string; detail?: "auto" | "low" | "high" };
 }
 
-export type CompletionsContentPart = TextContentPart | ImageUrlContentPart;
+/**
+ * Document attachment part. OpenAI accepts `file_id` or base64 `file_data`;
+ * OpenRouter's file-parser plugin additionally accepts a plain URL in
+ * `file_data`. Only valid on user messages.
+ */
+export interface FileContentPart {
+  type: "file";
+  file: {
+    filename?: string;
+    file_data?: string;
+    file_id?: string;
+  };
+}
+
+export type CompletionsContentPart =
+  TextContentPart | ImageUrlContentPart | FileContentPart;
 
 export interface SystemMessage {
   role: "system" | "developer";
@@ -53,10 +64,7 @@ export interface ToolMessage {
 }
 
 export type ChatMessage =
-  | SystemMessage
-  | UserMessage
-  | AssistantMessage
-  | ToolMessage;
+  SystemMessage | UserMessage | AssistantMessage | ToolMessage;
 
 export interface ChatToolCall {
   id: string;
@@ -136,19 +144,34 @@ export interface ChatCompletionChoice {
   logprobs?: unknown;
 }
 
-
 export interface UsageCostDetails {
   upstream_inference_cost?: number | null;
   upstream_inference_prompt_cost?: number | null;
   upstream_inference_completions_cost?: number | null;
 }
 
+export interface PromptTokensDetails {
+  cached_tokens?: number;
+  /**
+   * Prompt tokens written to the cache. Only reported on GPT-5.6 and later,
+   * where writes are billed at 1.25x the uncached input rate (earlier models
+   * cache for free and omit the field).
+   */
+  cache_write_tokens?: number;
+  [k: string]: number | undefined;
+}
+
+export interface CompletionTokensDetails {
+  reasoning_tokens?: number;
+  [k: string]: number | undefined;
+}
+
 export interface ChatCompletionUsage {
   prompt_tokens: number;
   completion_tokens: number;
   total_tokens: number;
-  prompt_tokens_details?: { cached_tokens?: number };
-  completion_tokens_details?: { reasoning_tokens?: number };
+  prompt_tokens_details?: PromptTokensDetails;
+  completion_tokens_details?: CompletionTokensDetails;
   cost?: number;
   cost_details?: UsageCostDetails;
 }
@@ -160,6 +183,9 @@ export interface ChatCompletionResponse {
   model: string;
   choices: ChatCompletionChoice[];
   usage?: ChatCompletionUsage;
+  // The tier that actually processed the request — may differ from the
+  // requested one (OpenAI downgrades priority past the ramp-rate limit).
+  service_tier?: string | null;
   system_fingerprint?: string;
 }
 
@@ -204,5 +230,7 @@ export interface ChatCompletionChunk {
   model: string;
   choices: ChatCompletionChunkChoice[];
   usage?: ChatCompletionUsage;
+  // See ChatCompletionResponse.service_tier — the served tier.
+  service_tier?: string | null;
   system_fingerprint?: string;
 }

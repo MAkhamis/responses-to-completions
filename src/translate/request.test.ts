@@ -44,7 +44,11 @@ describe("itemsToMessages content translation", () => {
         type: "message",
         role: "user",
         content: [
-          { type: "input_image", image_url: "https://cdn.example/a.jpg", detail: "high" },
+          {
+            type: "input_image",
+            image_url: "https://cdn.example/a.jpg",
+            detail: "high",
+          },
         ],
       },
     ];
@@ -72,7 +76,7 @@ describe("itemsToMessages content translation", () => {
     expect(msgs).toEqual([{ role: "system", content: "instructions" }]);
   });
 
-  it("skips input_image parts without a url", () => {
+  it("throws on an input_image carried only by file_id", () => {
     const input: InputItem[] = [
       {
         type: "message",
@@ -80,6 +84,105 @@ describe("itemsToMessages content translation", () => {
         content: [
           { type: "input_text", text: "just text" },
           { type: "input_image", file_id: "file_123" },
+        ],
+      },
+    ];
+    expect(() => itemsToMessages([], input, undefined)).toThrow(
+      /`file_id` cannot be forwarded/,
+    );
+  });
+
+  it("keeps input_file parts on user messages as chat file parts", () => {
+    const input: InputItem[] = [
+      {
+        type: "message",
+        role: "user",
+        content: [
+          { type: "input_text", text: "Summarize this document." },
+          {
+            type: "input_file",
+            file_url: "https://cdn.example/contract.pdf",
+            filename: "contract.pdf",
+          },
+        ],
+      },
+    ];
+    const msgs = itemsToMessages([], input, undefined);
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0].role).toBe("user");
+    expect(msgs[0].content).toEqual([
+      { type: "text", text: "Summarize this document." },
+      {
+        type: "file",
+        file: {
+          filename: "contract.pdf",
+          file_data: "https://cdn.example/contract.pdf",
+        },
+      },
+    ]);
+  });
+
+  it("a file-only user message keeps the file part instead of flattening to an empty string", () => {
+    const input: InputItem[] = [
+      {
+        type: "message",
+        role: "user",
+        content: [
+          { type: "input_file", file_url: "https://cdn.example/report.pdf" },
+        ],
+      },
+    ];
+    const msgs = itemsToMessages([], input, undefined);
+    expect(msgs[0].content).toEqual([
+      { type: "file", file: { file_data: "https://cdn.example/report.pdf" } },
+    ]);
+  });
+
+  it("prefers file_data over file_url and forwards file_id", () => {
+    const input: InputItem[] = [
+      {
+        type: "message",
+        role: "user",
+        content: [
+          {
+            type: "input_file",
+            file_data: "data:application/pdf;base64,AAAA",
+            file_url: "https://cdn.example/ignored.pdf",
+          },
+          { type: "input_file", file_id: "file-123" },
+        ],
+      },
+    ];
+    const msgs = itemsToMessages([], input, undefined);
+    expect(msgs[0].content).toEqual([
+      { type: "file", file: { file_data: "data:application/pdf;base64,AAAA" } },
+      { type: "file", file: { file_id: "file-123" } },
+    ]);
+  });
+
+  it("flattens file parts to text on non-user roles", () => {
+    const input: InputItem[] = [
+      {
+        type: "message",
+        role: "system",
+        content: [
+          { type: "input_text", text: "instructions" },
+          { type: "input_file", file_url: "https://cdn.example/a.pdf" },
+        ],
+      },
+    ];
+    const msgs = itemsToMessages([], input, undefined);
+    expect(msgs).toEqual([{ role: "system", content: "instructions" }]);
+  });
+
+  it("skips input_file parts with nothing to send", () => {
+    const input: InputItem[] = [
+      {
+        type: "message",
+        role: "user",
+        content: [
+          { type: "input_text", text: "just text" },
+          { type: "input_file", filename: "ghost.pdf" },
         ],
       },
     ];
@@ -107,7 +210,9 @@ describe("itemsToMessages encrypted reasoning replay", () => {
       id: "msg_1",
       role: "assistant" as const,
       status: "completed" as const,
-      content: [{ type: "output_text" as const, text: "hello", annotations: [] }],
+      content: [
+        { type: "output_text" as const, text: "hello", annotations: [] },
+      ],
     },
   ];
 

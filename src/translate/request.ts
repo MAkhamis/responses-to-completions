@@ -52,13 +52,39 @@ export function itemsToMessages(
     msgs.push({ role: "system", content: instructions });
   }
 
-  const all: ConversationItem[] = [...history, ...normalizeInput(newInput)];
+  const fresh = normalizeInput(newInput);
+  for (const item of fresh) assertUsableImageParts(item);
+  const all: ConversationItem[] = [...history, ...fresh];
 
   let pendingEncrypted: ReasoningDetail[] | null = null;
   for (const item of all) {
     pendingEncrypted = pushItem(msgs, item, pendingEncrypted, model);
   }
   return msgs;
+}
+
+/**
+ * Rejects an `input_image` the caller just passed that carries only `file_id`,
+ * naming the carriers that do work. Applied to fresh input only, and only on
+ * `role: "user"` — every other role has its content flattened to text, so an
+ * image there was never going to be sent either way.
+ */
+function assertUsableImageParts(item: InputItem): void {
+  const t = (item as { type?: string }).type;
+  if (t && t !== "message") return;
+  const m = item as InputMessageItem;
+  const role = m.role === "developer" ? "system" : m.role;
+  if (role !== "user" || !Array.isArray(m.content)) return;
+  for (const c of m.content) {
+    if (!c || typeof c !== "object") continue;
+    if ((c as { type?: string }).type !== "input_image") continue;
+    const img = c as { image_url?: string; file_id?: string };
+    if (!img.image_url && img.file_id) {
+      throw new Error(
+        'input_image: chat-completions backends take images by `image_url` (https or data URI) — `file_id` cannot be forwarded. Inline the image as a data URI, or use OpenAI\'s Responses endpoint (`endpoint: "responses"`).',
+      );
+    }
+  }
 }
 
 function normalizeInput(input: string | InputItem[] | undefined): InputItem[] {
@@ -93,14 +119,10 @@ function pushItem(
     const content = messageContentToChatContent(m.content);
     const role = m.role === "developer" ? "system" : m.role;
     if (role === "tool") return pendingEncrypted; // handled via function_call_output
-    // Multimodal (image) parts are only valid on user messages in the
-    // chat-completions schema; flatten to text for other roles.
     const safeContent =
       typeof content === "string" || role === "user"
         ? content
-        : content
-            .map((p) => (p.type === "text" ? p.text : ""))
-            .join("");
+        : content.map((p) => (p.type === "text" ? p.text : "")).join("");
     const msg: ChatMessage = {
       role: role as "system" | "user" | "assistant",
       content: safeContent,
@@ -160,8 +182,9 @@ function pushItem(
 
 /**
  * Text-only content flattens to a plain string; content with `input_image`
- * parts becomes a chat-completions multimodal content array so images
- * survive the translation (vision models).
+ * or `input_file` parts becomes a chat-completions multimodal content array
+ * so images (vision models) and documents (file-parsing backends) survive
+ * the translation.
  */
 function messageContentToChatContent(
   content: InputMessageItem["content"] | OutputItem[],
@@ -169,7 +192,7 @@ function messageContentToChatContent(
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return "";
   const parts: CompletionsContentPart[] = [];
-  let hasImage = false;
+  let hasNonText = false;
   for (const c of content) {
     if (!c || typeof c !== "object") continue;
     const type = (c as { type?: string }).type;
@@ -181,9 +204,13 @@ function messageContentToChatContent(
         text: (c as { refusal?: string }).refusal ?? "",
       });
     } else if (type === "input_image") {
-      const img = c as { image_url?: string; detail?: "auto" | "low" | "high" };
+      const img = c as {
+        image_url?: string;
+        file_id?: string;
+        detail?: "auto" | "low" | "high";
+      };
       if (img.image_url) {
-        hasImage = true;
+        hasNonText = true;
         parts.push({
           type: "image_url",
           image_url: {
@@ -192,9 +219,35 @@ function messageContentToChatContent(
           },
         });
       }
+      // A `file_id` with no `image_url` has nothing a chat-completions backend
+      // can fetch, so there is no part to emit. Fresh input never reaches here
+      // — `assertUsableImageParts` rejects it up front with the alternatives.
+    } else if (type === "input_file") {
+      const f = c as {
+        file_id?: string;
+        file_url?: string;
+        file_data?: string;
+        filename?: string;
+      };
+      // Chat-completions carries documents in `file.file_data` (base64) or by
+      // `file_id`; a plain URL in `file_data` is an OpenRouter file-parser
+      // extension, and OpenAICompatAdapter rejects it before sending. A part
+      // with neither has nothing to send — skip it.
+      const fileData = f.file_data ?? f.file_url;
+      if (fileData || f.file_id) {
+        hasNonText = true;
+        parts.push({
+          type: "file",
+          file: {
+            ...(f.filename ? { filename: f.filename } : {}),
+            ...(fileData ? { file_data: fileData } : {}),
+            ...(f.file_id ? { file_id: f.file_id } : {}),
+          },
+        });
+      }
     }
   }
-  if (!hasImage) {
+  if (!hasNonText) {
     return parts.map((p) => (p.type === "text" ? p.text : "")).join("");
   }
   return parts;

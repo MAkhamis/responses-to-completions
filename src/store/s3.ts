@@ -51,23 +51,25 @@ export class S3Store implements Store {
     const prev = this.locks.get(key) ?? Promise.resolve();
     let release!: () => void;
     const next = new Promise<void>((r) => (release = r));
-    this.locks.set(
-      key,
-      prev.then(() => next),
-    );
+    const mine = prev.then(() => next);
+    this.locks.set(key, mine);
     await prev;
     try {
       return await fn();
     } finally {
       release();
-      if (this.locks.get(key) === prev.then(() => next)) this.locks.delete(key);
+      if (this.locks.get(key) === mine) this.locks.delete(key);
     }
   }
 
-  private async getJson<T>(key: string): Promise<T | null> {
+  private async getJson<T>(
+    key: string,
+    signal?: AbortSignal,
+  ): Promise<T | null> {
     try {
       const resp = await this.client.send(
         new GetObjectCommand({ Bucket: this.bucket, Key: key }),
+        { abortSignal: signal },
       );
       const body = await resp.Body?.transformToString("utf-8");
       if (!body) return null;
@@ -81,7 +83,7 @@ export class S3Store implements Store {
     }
   }
 
-  private async putJson(key: string, data: unknown) {
+  private async putJson(key: string, data: unknown, signal?: AbortSignal) {
     await this.client.send(
       new PutObjectCommand({
         Bucket: this.bucket,
@@ -89,6 +91,7 @@ export class S3Store implements Store {
         Body: JSON.stringify(data),
         ContentType: "application/json",
       }),
+      { abortSignal: signal },
     );
   }
 
@@ -106,11 +109,14 @@ export class S3Store implements Store {
   }
 
   // ---- conversations ----
-  async createConversation(input: {
-    id?: string;
-    metadata?: Record<string, string> | null;
-    items?: ConversationItem[];
-  }): Promise<ConversationObject> {
+  async createConversation(
+    input: {
+      id?: string;
+      metadata?: Record<string, string> | null;
+      items?: ConversationItem[];
+    },
+    signal?: AbortSignal,
+  ): Promise<ConversationObject> {
     const id = input.id ?? genConvId();
     const convo: ConversationObject & { items: ConversationItem[] } = {
       id,
@@ -119,15 +125,18 @@ export class S3Store implements Store {
       metadata: input.metadata ?? null,
       items: input.items ?? [],
     };
-    await this.putJson(this.key("conversations", id), convo);
+    await this.putJson(this.key("conversations", id), convo, signal);
     const { items: _omit, ...meta } = convo;
     return meta;
   }
 
-  async getConversation(id: string): Promise<ConversationObject | null> {
+  async getConversation(
+    id: string,
+    signal?: AbortSignal,
+  ): Promise<ConversationObject | null> {
     const data = await this.getJson<
       ConversationObject & { items: ConversationItem[] }
-    >(this.key("conversations", id));
+    >(this.key("conversations", id), signal);
     if (!data) return null;
     const { items: _omit, ...meta } = data;
     return meta;
@@ -160,25 +169,31 @@ export class S3Store implements Store {
   async appendItems(
     conversationId: string,
     items: ConversationItem[],
+    signal?: AbortSignal,
   ): Promise<void> {
     if (items.length === 0) return;
     await this.withLock(`conv:${conversationId}`, async () => {
       const data = await this.getJson<
         ConversationObject & { items: ConversationItem[] }
-      >(this.key("conversations", conversationId));
+      >(this.key("conversations", conversationId), signal);
       if (!data) throw new Error(`Conversation not found: ${conversationId}`);
       data.items.push(...items);
-      await this.putJson(this.key("conversations", conversationId), data);
+      await this.putJson(
+        this.key("conversations", conversationId),
+        data,
+        signal,
+      );
     });
   }
 
   async listItems(
     conversationId: string,
     opts?: { limit?: number; after?: string; order?: "asc" | "desc" },
+    signal?: AbortSignal,
   ): Promise<{ items: ConversationItem[]; hasMore: boolean }> {
     const data = await this.getJson<
       ConversationObject & { items: ConversationItem[] }
-    >(this.key("conversations", conversationId));
+    >(this.key("conversations", conversationId), signal);
     if (!data) return { items: [], hasMore: false };
 
     let items = data.items.slice();
@@ -221,12 +236,18 @@ export class S3Store implements Store {
   }
 
   // ---- responses ----
-  async saveResponse(resp: ResponseObject): Promise<void> {
-    await this.putJson(this.key("responses", resp.id), resp);
+  async saveResponse(
+    resp: ResponseObject,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    await this.putJson(this.key("responses", resp.id), resp, signal);
   }
 
-  async getResponse(id: string): Promise<ResponseObject | null> {
-    return this.getJson<ResponseObject>(this.key("responses", id));
+  async getResponse(
+    id: string,
+    signal?: AbortSignal,
+  ): Promise<ResponseObject | null> {
+    return this.getJson<ResponseObject>(this.key("responses", id), signal);
   }
 
   async deleteResponse(id: string): Promise<{ id: string; deleted: boolean }> {

@@ -19,6 +19,7 @@ import type {
   McpToolDef,
   OutputItem,
   ResponseObject,
+  ResponseStatus,
   ToolDef,
   Usage,
 } from "./types/responses.js";
@@ -46,6 +47,7 @@ import {
 import type { ConversationItem } from "./store/store.js";
 
 export interface AgentLoopDeps {
+  /** Backend every run goes to. */
   backend: BackendAdapter;
   /** Hard cap on backend round-trips per /v1/responses call. */
   maxIterations?: number;
@@ -67,19 +69,21 @@ export class AgentLoop {
 
   /** Non-streaming execution. */
   async run(ctx: AgentRunContext): Promise<AgentRunResult> {
-    if (this.deps.backend.mode === "responses") {
-      return this.runViaResponses(ctx);
+    const { backend } = this.deps;
+    if (backend.mode === "responses") {
+      return this.runViaResponses(ctx, backend);
     }
-    const complete = this.deps.backend.complete;
+    const complete = backend.complete;
     if (!complete) {
       throw new Error(
-        `Backend "${this.deps.backend.name}" declares mode "completions" but does not implement complete().`,
+        `Backend "${backend.name}" declares mode "completions" but does not implement complete().`,
       );
     }
     const mcpSetup = await this.setupMcp(ctx.request.tools);
     const clientFunctionTools = collectClientFunctionTools(ctx.request.tools);
     const producedItems: OutputItem[] = [...mcpSetup.listItems];
     let usage: Usage | null = null;
+    let servedTier: string | null = null;
     const maxIter = this.deps.maxIterations ?? 10;
 
     try {
@@ -97,17 +101,27 @@ export class AgentLoop {
           messages,
           chatTools,
         );
-        const resp = await complete.call(this.deps.backend, req, ctx.signal);
+        const resp = await complete.call(backend, req, ctx.signal);
         usage = mergeUsage(usage, translateUsage(resp.usage));
+        servedTier = resp.service_tier ?? servedTier;
 
-        const { items: newItems, outputText: _ } =
-          completionToOutputItems(resp, ctx.request.model);
+        const {
+          items: newItems,
+          outputText: _,
+          finishReason,
+        } = completionToOutputItems(resp, ctx.request.model);
         producedItems.push(...newItems);
 
         const pendingFcs = newItems.filter(
           (it): it is FunctionCallItem => it.type === "function_call",
         );
-        if (pendingFcs.length === 0) return { items: producedItems, usage };
+        if (pendingFcs.length === 0)
+          return {
+            items: producedItems,
+            usage,
+            serviceTier: servedTier,
+            ...terminalStatus(finishReason),
+          };
 
         // Split tool calls into MCP (server-executed) vs client function tools.
         const { mcpCalls, clientCalls } = classifyCalls(
@@ -117,7 +131,12 @@ export class AgentLoop {
         if (clientCalls.length > 0) {
           // Client must execute these; stop and return them as function_call items.
           // (Mixed batches: we still surface the MCP items we already executed.)
-          return { items: producedItems, usage };
+          return {
+            items: producedItems,
+            usage,
+            serviceTier: servedTier,
+            ...terminalStatus(finishReason),
+          };
         }
 
         // Execute MCP calls in the order the model requested them.
@@ -132,7 +151,12 @@ export class AgentLoop {
             // Remove the surrogate function_call from produced items (we don't
             // want to expose internal plumbing when pausing for approval).
             removeFunctionCall(producedItems, fc.call_id);
-            return { items: producedItems, usage };
+            return {
+              items: producedItems,
+              usage,
+              serviceTier: servedTier,
+              ...terminalStatus(finishReason),
+            };
           }
           producedItems.push(mcpOutcome.item);
           // Remove surrogate function_call: the Responses API surfaces the
@@ -156,7 +180,12 @@ export class AgentLoop {
         ];
       }
 
-      return { items: producedItems, usage };
+      return {
+        items: producedItems,
+        usage,
+        serviceTier: servedTier,
+        ...maxIterationsStatus(),
+      };
     } finally {
       await mcpSetup.close();
     }
@@ -170,19 +199,21 @@ export class AgentLoop {
   async *stream(
     ctx: AgentRunContext,
   ): AsyncGenerator<StreamEvent, AgentRunResult> {
-    if (this.deps.backend.mode === "responses") {
-      return yield* this.streamViaResponses(ctx);
+    const { backend } = this.deps;
+    if (backend.mode === "responses") {
+      return yield* this.streamViaResponses(ctx, backend);
     }
-    const stream = this.deps.backend.stream;
+    const stream = backend.stream;
     if (!stream) {
       throw new Error(
-        `Backend "${this.deps.backend.name}" declares mode "completions" but does not implement stream().`,
+        `Backend "${backend.name}" declares mode "completions" but does not implement stream().`,
       );
     }
     const mcpSetup = await this.setupMcp(ctx.request.tools);
     const clientFunctionTools = collectClientFunctionTools(ctx.request.tools);
     const producedItems: OutputItem[] = [];
     let usage: Usage | null = null;
+    let servedTier: string | null = null;
     let seq = 0;
     const maxIter = this.deps.maxIterations ?? 10;
 
@@ -218,16 +249,22 @@ export class AgentLoop {
           messages,
           chatTools,
         );
-        const chunks = stream.call(this.deps.backend, req, ctx.signal);
+        const chunks = stream.call(backend, req, ctx.signal);
         const snapshot = snapshotResponseFor(ctx, producedItems);
         const gen = translateChunkStream(
-          reindexChunks(chunks, producedItems.length),
+          chunks,
           snapshot,
           seq,
+          producedItems.length,
         );
 
         // Pipe through the translator, collecting items + usage when it finishes.
-        let stepResult: { items: OutputItem[]; usage: Usage | null } = {
+        let stepResult: {
+          items: OutputItem[];
+          usage: Usage | null;
+          serviceTier?: string | null;
+          finishReason?: string | null;
+        } = {
           items: [],
           usage: null,
         };
@@ -237,6 +274,8 @@ export class AgentLoop {
             stepResult = r.value as {
               items: OutputItem[];
               usage: Usage | null;
+              serviceTier?: string | null;
+              finishReason?: string | null;
             };
             break;
           }
@@ -245,18 +284,31 @@ export class AgentLoop {
         }
 
         usage = mergeUsage(usage, stepResult.usage);
+        servedTier = stepResult.serviceTier ?? servedTier;
         producedItems.push(...stepResult.items);
 
         const pendingFcs = stepResult.items.filter(
           (it): it is FunctionCallItem => it.type === "function_call",
         );
-        if (pendingFcs.length === 0) return { items: producedItems, usage };
+        if (pendingFcs.length === 0)
+          return {
+            items: producedItems,
+            usage,
+            serviceTier: servedTier,
+            ...terminalStatus(stepResult.finishReason),
+          };
 
         const { mcpCalls, clientCalls } = classifyCalls(
           pendingFcs,
           mcpSetup.toolToServer,
         );
-        if (clientCalls.length > 0) return { items: producedItems, usage };
+        if (clientCalls.length > 0)
+          return {
+            items: producedItems,
+            usage,
+            serviceTier: servedTier,
+            ...terminalStatus(stepResult.finishReason),
+          };
 
         const toolMessages: ChatMessage[] = [];
         for (const fc of mcpCalls) {
@@ -277,7 +329,12 @@ export class AgentLoop {
             item: outcome.item,
           };
           if (outcome.kind === "approval") {
-            return { items: producedItems, usage };
+            return {
+              items: producedItems,
+              usage,
+              serviceTier: servedTier,
+              ...terminalStatus(stepResult.finishReason),
+            };
           }
           toolMessages.push({
             role: "tool",
@@ -296,7 +353,12 @@ export class AgentLoop {
         ];
       }
 
-      return { items: producedItems, usage };
+      return {
+        items: producedItems,
+        usage,
+        serviceTier: servedTier,
+        ...maxIterationsStatus(),
+      };
     } finally {
       await mcpSetup.close();
     }
@@ -314,56 +376,94 @@ export class AgentLoop {
    */
   private async runViaResponses(
     ctx: AgentRunContext,
+    backend: BackendAdapter,
   ): Promise<AgentRunResult> {
-    if (!this.deps.backend.respond) {
+    if (!backend.respond) {
       throw new Error(
-        `Backend "${this.deps.backend.name}" declares mode "responses" but does not implement respond().`,
+        `Backend "${backend.name}" declares mode "responses" but does not implement respond().`,
       );
     }
     const upstreamReq = buildResponsesPassthrough(ctx, false);
-    const resp = await this.deps.backend.respond(upstreamReq, ctx.signal);
-    if (resp.status === "failed" && resp.error) {
-      throw new Error(`Upstream /responses failed: ${resp.error.message}`);
+    const resp = await backend.respond(upstreamReq, ctx.signal);
+    if (resp.status === "failed") {
+      throw new Error(
+        `Upstream /responses failed: ${resp.error?.message ?? "(no error reported)"}`,
+      );
     }
-    return { items: resp.output, usage: resp.usage };
+    if (resp.id) ctx.onUpstreamResponseId?.(resp.id);
+    return {
+      items: Array.isArray(resp.output) ? resp.output : [],
+      usage: resp.usage,
+      serviceTier: resp.service_tier ?? null,
+      upstreamResponseId: resp.id ?? null,
+      status: resp.status,
+      incompleteDetails: resp.incomplete_details ?? null,
+    };
   }
 
   /**
    * Streaming pass-through for adapters whose `mode === "responses"`.
    * Forwards upstream `StreamEvent`s out unchanged with one exception: we
    * swallow the upstream-emitted lifecycle events (`response.created`,
-   * `response.in_progress`, `response.completed`, `response.failed`) because
-   * the `StreamResponse` wrapper in the SDK client emits its own with the
-   * SDK-side id and conversation. Items + usage are accumulated from
-   * `response.output_item.done` and `response.completed`.
+   * `response.in_progress`, `response.completed`, `response.incomplete`,
+   * `response.failed`) because the `StreamResponse` wrapper in the SDK client
+   * emits its own with the SDK-side id and conversation. Items + usage are
+   * accumulated from `response.output_item.done` and the terminal event.
    */
   private async *streamViaResponses(
     ctx: AgentRunContext,
+    backend: BackendAdapter,
   ): AsyncGenerator<StreamEvent, AgentRunResult> {
-    if (!this.deps.backend.respondStream) {
+    if (!backend.respondStream) {
       throw new Error(
-        `Backend "${this.deps.backend.name}" declares mode "responses" but does not implement respondStream().`,
+        `Backend "${backend.name}" declares mode "responses" but does not implement respondStream().`,
       );
     }
     const upstreamReq = buildResponsesPassthrough(ctx, true);
     const items: OutputItem[] = [];
     let usage: Usage | null = null;
+    let servedTier: string | null = null;
+    let upstreamId: string | null = null;
+    let status: ResponseStatus | undefined;
+    let incompleteDetails: { reason: string } | null = null;
     let seq = 0;
 
-    for await (const ev of this.deps.backend.respondStream(
-      upstreamReq,
-      ctx.signal,
-    )) {
-      if (ev.type === "response.completed") {
+    /**
+     * The lifecycle events below are swallowed, but they carry the id the
+     * provider issued — the only handle by which the turn can be fetched
+     * again. `response.created` arrives first, so the client learns it before
+     * it has emitted anything of its own.
+     */
+    const noteId = (id: string | undefined): void => {
+      if (!id || upstreamId) return;
+      upstreamId = id;
+      ctx.onUpstreamResponseId?.(id);
+    };
+
+    for await (const ev of backend.respondStream(upstreamReq, ctx.signal)) {
+      noteId((ev as { response?: ResponseObject }).response?.id);
+      if (
+        ev.type === "response.completed" ||
+        ev.type === "response.incomplete"
+      ) {
         if (ev.response.output?.length) {
           items.splice(0, items.length, ...ev.response.output);
         }
         if (ev.response.usage) usage = ev.response.usage;
+        servedTier = ev.response.service_tier ?? servedTier;
+        status = ev.type === "response.incomplete" ? "incomplete" : "completed";
+        incompleteDetails = ev.response.incomplete_details ?? null;
         continue;
       }
       if (ev.type === "response.failed") {
         throw new Error(
           `Upstream /responses failed: ${ev.response.error?.message ?? "unknown"}`,
+        );
+      }
+      if ((ev as { type?: string }).type === "error") {
+        const e = ev as unknown as { code?: string; message?: string };
+        throw new Error(
+          `Upstream /responses error: ${e.message ?? e.code ?? "unknown"}`,
         );
       }
       if (
@@ -377,7 +477,29 @@ export class AgentLoop {
       }
       yield { ...ev, sequence_number: seq++ };
     }
-    return { items, usage };
+    // The loop never verified that a terminal event arrived, so a stream that
+    // died mid-flight returned with `status` unset — which the client stamps
+    // `"completed"`, reporting billed, possibly-truncated content as a fully
+    // successful turn.
+    //
+    // Reported as `"incomplete"` rather than thrown: the items already yielded
+    // are real and were paid for, and not every terminal-event-less stream is a
+    // failure — an OpenAI-compatible `/responses` proxy may close the stream
+    // with the chat-completions `[DONE]` sentinel and no `response.completed`.
+    // Throwing discarded a delivered turn in that case; `"incomplete"` claims
+    // no success and keeps the content.
+    if (status === undefined) {
+      status = "incomplete";
+      incompleteDetails = { reason: "interrupted" };
+    }
+    return {
+      items,
+      usage,
+      serviceTier: servedTier,
+      upstreamResponseId: upstreamId,
+      status,
+      incompleteDetails,
+    };
   }
 
   // --- helpers ---
@@ -407,10 +529,8 @@ export class AgentLoop {
           id: genMcpListId(),
           server_label: tool.server_label,
           tools: [],
-          // OpenAI's shape doesn't carry an error field here; we surface via metadata
-          // conventions most clients ignore, but callers can inspect it.
-          ...({ error: msg } as Record<string, unknown>),
-        } as McpListToolsItem);
+          error: msg,
+        });
         continue;
       }
 
@@ -514,11 +634,43 @@ export interface AgentRunContext {
   request: CreateResponseRequest;
   history: ConversationItem[];
   signal?: AbortSignal;
+  /**
+   * Called as soon as a native `/responses` backend reveals the id it issued
+   * for this turn, before any event is yielded. Streaming callers use it to
+   * emit their own `response.created` under that id rather than a local one.
+   * Never called for `mode: "completions"` backends — nothing upstream owns
+   * the turn there.
+   */
+  onUpstreamResponseId?: (id: string) => void;
 }
 
 export interface AgentRunResult {
   items: OutputItem[];
   usage: Usage | null;
+  /**
+   * The service tier the backend actually served (it may downgrade the
+   * requested one, e.g. priority past OpenAI's ramp-rate limit). Null when
+   * the backend didn't report a tier.
+   */
+  serviceTier?: string | null;
+  /**
+   * The id a native `/responses` backend issued for this turn. The provider
+   * persists the turn under it, so the client adopts it as the response's id
+   * and `previous_response_id` resolves against the provider afterwards.
+   * Null for `mode: "completions"` runs — those turns are synthesized here
+   * and only a store that persists responses can retrieve them.
+   */
+  upstreamResponseId?: string | null;
+  /**
+   * The terminal status of the turn — e.g. `"incomplete"` when
+   * `max_output_tokens` truncated it. A native `/responses` backend reports
+   * this directly; for `mode: "completions"` it is derived from the last
+   * turn's `finish_reason` (see {@link terminalStatus}). Unset means the turn
+   * ended normally and the client treats it as `"completed"`.
+   */
+  status?: ResponseStatus;
+  /** Why the turn ended `"incomplete"`, verbatim from the backend. */
+  incompleteDetails?: { reason: string } | null;
 }
 
 interface ResolvedMcpServer {
@@ -528,6 +680,47 @@ interface ResolvedMcpServer {
 }
 
 // ---- helpers ----
+
+/**
+ * Maps a chat-completions `finish_reason` onto the Responses-API terminal
+ * status. `"stop"`/`"tool_calls"` are ordinary completions; the two capped
+ * reasons become `incomplete` so a caller can tell a model that finished from
+ * one the cap cut off. Without this the completions path — the default one —
+ * reports a truncated turn as fully completed and never emits
+ * `response.incomplete`.
+ */
+function terminalStatus(finishReason: string | null | undefined): {
+  status?: ResponseStatus;
+  incompleteDetails?: { reason: string } | null;
+} {
+  if (finishReason === "length") {
+    return {
+      status: "incomplete",
+      incompleteDetails: { reason: "max_output_tokens" },
+    };
+  }
+  if (finishReason === "content_filter") {
+    return {
+      status: "incomplete",
+      incompleteDetails: { reason: "content_filter" },
+    };
+  }
+  return {};
+}
+
+/**
+ * Exhausting `maxIterations` is the same gap by a second route: the turn stops
+ * with tool calls still pending, which is not a completed response.
+ */
+function maxIterationsStatus(): {
+  status: ResponseStatus;
+  incompleteDetails: { reason: string };
+} {
+  return {
+    status: "incomplete",
+    incompleteDetails: { reason: "max_tool_calls" },
+  };
+}
 
 function collectClientFunctionTools(
   tools: ToolDef[] | undefined,
@@ -632,7 +825,7 @@ function removeFunctionCall(items: OutputItem[], callId: string): void {
   if (idx >= 0) items.splice(idx, 1);
 }
 
-function mergeUsage(a: Usage | null, b: Usage | null): Usage | null {
+export function mergeUsage(a: Usage | null, b: Usage | null): Usage | null {
   if (!a) return b;
   if (!b) return a;
   return {
@@ -645,7 +838,44 @@ function mergeUsage(a: Usage | null, b: Usage | null): Usage | null {
     ...(a.cost_details || b.cost_details
       ? { cost_details: mergeCostDetails(a.cost_details, b.cost_details) }
       : {}),
+    ...(a.input_tokens_details || b.input_tokens_details
+      ? {
+          input_tokens_details: mergeTokenDetails(
+            a.input_tokens_details,
+            b.input_tokens_details,
+          )!,
+        }
+      : {}),
+    ...(a.output_tokens_details || b.output_tokens_details
+      ? {
+          output_tokens_details: mergeTokenDetails(
+            a.output_tokens_details,
+            b.output_tokens_details,
+          )!,
+        }
+      : {}),
   };
+}
+
+/**
+ * Sum per-token-type breakdowns across loop iterations. Keyed generically over
+ * the union of both sides so fields we don't model explicitly (upstreams keep
+ * adding them) accumulate instead of being dropped.
+ */
+function mergeTokenDetails<T extends Record<string, number | undefined>>(
+  a?: T,
+  b?: T,
+): T | undefined {
+  if (!a) return b;
+  if (!b) return a;
+  const out: Record<string, number> = {};
+  for (const k of new Set([...Object.keys(a), ...Object.keys(b)])) {
+    const x = a[k];
+    const y = b[k];
+    if (typeof x === "number" || typeof y === "number")
+      out[k] = (x ?? 0) + (y ?? 0);
+  }
+  return out as T;
 }
 
 function mergeCostDetails(
@@ -665,9 +895,7 @@ function mergeCostDetails(
   );
   return {
     ...(upstream !== undefined ? { upstream_inference_cost: upstream } : {}),
-    ...(prompt !== undefined
-      ? { upstream_inference_prompt_cost: prompt }
-      : {}),
+    ...(prompt !== undefined ? { upstream_inference_prompt_cost: prompt } : {}),
     ...(completions !== undefined
       ? { upstream_inference_completions_cost: completions }
       : {}),
@@ -712,15 +940,27 @@ function buildResponsesPassthrough(
   stream: boolean,
 ): CreateResponseRequest {
   const inputItems = combineHistoryAndInput(ctx.history, ctx.request.input);
+  // Conversation state and transport are resolved here, so those keys never
+  // reach the upstream payload.
+  //
+  // `store` is deliberately NOT one of them — it is the caller's persistence
+  // opt-out and the provider honors it too. The consequence (not adopting the
+  // provider's response id for a turn it was told to discard) is handled at
+  // the adoption site in `client.ts`, not by stripping the key again here.
   const {
     conversation: _c,
     previous_response_id: _p,
-    store: _s,
+    store,
     stream: _st,
     signal: _sig,
     ...rest
   } = ctx.request as CreateResponseRequest & { signal?: AbortSignal };
-  return { ...rest, input: inputItems, stream };
+  return {
+    ...rest,
+    input: inputItems,
+    stream,
+    ...(store !== undefined ? { store } : {}),
+  };
 }
 
 function combineHistoryAndInput(
@@ -736,20 +976,4 @@ function combineHistoryAndInput(
     }
   }
   return out;
-}
-
-/**
- * Later iterations of the agent loop start numbering their chunks from 0
- * again (since each backend call is a fresh stream), but Responses-API
- * output_index is a monotonic counter across the whole response. The stream
- * translator uses its own local nextOutputIndex; we feed it a positional
- * offset implicitly by treating each iteration as a fresh translator instance
- * and then the caller re-indexes produced items when concatenating. For the
- * event sequence_number we use a single monotonic counter in the outer loop.
- */
-async function* reindexChunks<T>(
-  src: AsyncIterable<T>,
-  _baseIndex: number,
-): AsyncIterable<T> {
-  for await (const x of src) yield x;
 }

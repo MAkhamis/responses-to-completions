@@ -15,16 +15,8 @@
  */
 import * as readline from "node:readline/promises";
 import { stdin, stdout, exit } from "node:process";
-import {
-  LocalFileStore,
-  OllamaAdapter,
-  OllamaAdapterOptions,
-  OpenAICompatAdapter,
-  OpenAICompatAdapterOptions,
-  OpenRouterAdapter,
-  OpenRouterAdapterOptions,
-  ResponsesClient,
-} from "../src/index.js";
+import { ResponsesClient } from "../src/index.js";
+import { clientOptions } from "./build-client.js";
 
 const BASE_URL = "BASE_URL";
 const API_KEY = "API-KEY";
@@ -35,27 +27,19 @@ async function chat(
   streaming: boolean,
   store: boolean,
 ): Promise<void> {
-  const adapterArgs:
-    | OllamaAdapterOptions
-    | OpenAICompatAdapterOptions
-    | OpenRouterAdapterOptions = {
-    baseUrl: BASE_URL,
-    apiKey: API_KEY,
-  } as const;
-
-  const selectBackend =
-    backendKind == "openrouter"
-      ? new OpenRouterAdapter({ ...adapterArgs } as OpenRouterAdapterOptions)
-      : backendKind == "openai"
-        ? new OpenAICompatAdapter({
-            ...adapterArgs,
-          } as OpenAICompatAdapterOptions)
-        : new OllamaAdapter({ ...adapterArgs } as OllamaAdapterOptions);
-
-  const client = new ResponsesClient({
-    backend: selectBackend,
-    store: new LocalFileStore(".data"),
-  });
+  const client = new ResponsesClient(
+    clientOptions({
+      backend:
+        backendKind === "openrouter"
+          ? "openrouter"
+          : backendKind === "openai"
+            ? "openai-compat"
+            : "ollama",
+      baseUrl: BASE_URL,
+      apiKey: API_KEY,
+      storeLocal: ".data",
+    }),
+  );
 
   const conv = store ? await client.conversations.create({}) : null;
 

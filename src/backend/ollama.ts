@@ -52,8 +52,21 @@ export class OllamaAdapter implements BackendAdapter {
   }
 
   private toOllamaBody(req: ChatCompletionRequest, stream: boolean) {
+    // `toOllamaBody` used to discard everything it could not express instead of
+    // failing — `partsToText` flattened `file`/`image_url` parts away and the
+    // tool-control fields were omitted, so an attached document never reached
+    // the model and a pinned tool silently came back as prose. Native
+    // /api/chat has no document field, so documents are rejected rather than
+    // translated; images it does support, via `message.images`.
+    //
+    // Rejection is scoped to the turn being asked (see `currentTurnIndex`):
+    // `req.messages` also carries replayed conversation history, and a stored
+    // part there is not something the caller can rewrite — throwing on it broke
+    // every later turn on the conversation, including brand-new text-only ones.
+    const turn = currentTurnIndex(req.messages);
+    assertNativeCanExpress(req, turn);
     const model = this.opts.forceModel ?? req.model;
-    const messages = req.messages.map((m) => {
+    const messages = req.messages.map((m, i) => {
       if (m.role === "tool") {
         return {
           role: "tool",
@@ -63,10 +76,15 @@ export class OllamaAdapter implements BackendAdapter {
         };
       }
       const asst = m as typeof m & { tool_calls?: ChatToolCall[] };
+      const images =
+        typeof m.content === "string"
+          ? []
+          : partsToImages(m.content, i === turn);
       return {
         role: m.role === "developer" ? "system" : m.role,
         content:
           typeof m.content === "string" ? m.content : partsToText(m.content),
+        ...(images.length ? { images } : {}),
         ...(asst.tool_calls
           ? {
               tool_calls: asst.tool_calls.map((tc) => ({
@@ -193,7 +211,7 @@ export class OllamaAdapter implements BackendAdapter {
       if (ev.done) return;
     }
   }
-  
+
   async embeddings(
     req: EmbeddingsRequest,
     signal?: AbortSignal,
@@ -318,6 +336,87 @@ function partsToText(parts: unknown): string {
         : "",
     )
     .join("");
+}
+
+/**
+ * The index of the message carrying the turn being asked — the last `user`
+ * message. Everything before it is replayed history: already-answered turns
+ * whose content the caller can no longer change, so an unusable part there is
+ * dropped rather than rejected. Returns -1 when there is no user message.
+ */
+function currentTurnIndex(messages: ChatCompletionRequest["messages"]): number {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i]!.role === "user") return i;
+  }
+  return -1;
+}
+
+/**
+ * Native /api/chat carries images as bare base64 on `message.images`, so a
+ * data URI can be forwarded but a remote URL cannot — this adapter will not
+ * fetch the caller's URLs for them.
+ *
+ * `strict` is set only for the turn being asked: a URL there is rejected so it
+ * cannot go out silently degraded, while one replayed from history is dropped
+ * (the model already answered that turn, and the caller cannot rewrite it).
+ */
+function partsToImages(parts: unknown, strict: boolean): string[] {
+  if (!Array.isArray(parts)) return [];
+  const out: string[] = [];
+  for (const p of parts) {
+    if (!p || typeof p !== "object") continue;
+    const part = p as { type?: string; image_url?: { url?: string } };
+    if (part.type !== "image_url") continue;
+    const url = part.image_url?.url;
+    if (!url) continue;
+    // `[^,]*` rather than `[^;,]*`: a data URI may carry parameters before the
+    // `;base64` marker (`data:image/png;charset=utf-8;base64,…`), and rejecting
+    // one as "not base64" was both wrong and unactionable.
+    const base64 = /^data:[^,]*;base64,(.*)$/is.exec(url)?.[1];
+    if (!base64) {
+      if (!strict) continue;
+      throw new Error(
+        `input_image: Ollama's native /api/chat takes images as base64, not a URL ("${url}"). Inline the image as a data URI, or use \`api: "openai"\` to reach Ollama's OpenAI-compatible route.`,
+      );
+    }
+    out.push(base64);
+  }
+  return out;
+}
+
+/**
+ * Rejects request shapes the native route cannot carry, so they fail loudly
+ * instead of going out silently degraded. `OllamaAdapter.embeddings` already
+ * throws rather than degrade an unsupported input shape; this matches it.
+ *
+ * Content is checked only on `turnIndex`, the turn being asked. `tool_choice`
+ * and `parallel_tool_calls` come from the current request either way, so they
+ * are always checked.
+ */
+function assertNativeCanExpress(
+  req: ChatCompletionRequest,
+  turnIndex: number,
+): void {
+  const msg = turnIndex >= 0 ? req.messages[turnIndex] : undefined;
+  if (msg && Array.isArray(msg.content)) {
+    for (const part of msg.content) {
+      if (part.type === "file") {
+        throw new Error(
+          `input_file: Ollama's native /api/chat has no document field, so the file would be dropped and the model would answer about a document it never received. Use \`api: "openai"\` to reach Ollama's OpenAI-compatible route, which forwards base64 \`file_data\` and \`file_id\`.`,
+        );
+      }
+    }
+  }
+  if (req.tool_choice !== undefined && req.tool_choice !== "auto") {
+    throw new Error(
+      `tool_choice: Ollama's native /api/chat cannot constrain tool selection, so ${JSON.stringify(req.tool_choice)} would be ignored and the model could answer without calling the tool. Use \`api: "openai"\`, or drop \`tool_choice\`.`,
+    );
+  }
+  if (req.parallel_tool_calls === false) {
+    throw new Error(
+      'parallel_tool_calls: Ollama\'s native /api/chat cannot disable parallel tool calls, so `false` would be silently ignored. Use `api: "openai"`, or drop the field.',
+    );
+  }
 }
 
 function safeJsonParse(s: string): unknown {

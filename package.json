@@ -1,6 +1,6 @@
 {
   "name": "responses-to-completions",
-  "version": "0.3.2",
+  "version": "0.4.0",
   "description": "SDK that exposes the OpenAI Responses API on top of any /v1/chat/completions backend (vLLM, Ollama, llama.cpp, TGI, etc.). Handles conversation state, MCP tool execution, and streaming event translation.",
   "keywords": [
     "openai",
@@ -37,7 +37,9 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.test.json",
     "sdk-script": "tsx examples/sdk-script.ts",
+    "try": "tsx --env-file=.env examples/try.ts",
     "test": "vitest run",
     "prepublishOnly": "npm run build"
   },

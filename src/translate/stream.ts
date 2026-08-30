@@ -106,6 +106,11 @@ export type StreamEvent =
       response: ResponseObject;
     }
   | {
+      type: "response.incomplete";
+      sequence_number: number;
+      response: ResponseObject;
+    }
+  | {
       type: "response.failed";
       sequence_number: number;
       response: ResponseObject;
@@ -120,8 +125,9 @@ export type StreamEvent =
 /**
  * Translates a stream of OpenAI-compat chat.completion.chunk events into
  * the Responses-API event sequence, starting from an initial in-progress
- * ResponseObject snapshot. Returns the final resolved items + usage for
- * the caller to persist and emit response.completed.
+ * ResponseObject snapshot. Returns the final resolved items + usage (and
+ * the served service_tier when the backend reported one) for the caller to
+ * persist and emit response.completed.
  *
  * Lifecycle per choice:
  *   1. First content delta  → output_item.added (message) + content_part.added
@@ -138,9 +144,18 @@ export async function* translateChunkStream(
   chunks: AsyncIterable<ChatCompletionChunk>,
   initialResponse: ResponseObject,
   startSeq = 0,
+  /**
+   */
+  startOutputIndex = 0,
 ): AsyncGenerator<
   StreamEvent,
-  { items: OutputItem[]; usage: ReturnType<typeof translateUsage> }
+  {
+    items: OutputItem[];
+    usage: ReturnType<typeof translateUsage>;
+    serviceTier: string | null;
+    /** Terminal `finish_reason` of this turn, for incomplete-status mapping. */
+    finishReason: string | null;
+  }
 > {
   let seq = startSeq;
 
@@ -164,13 +179,16 @@ export async function* translateChunkStream(
   };
   const tools = new Map<number, ToolState>();
 
-  let nextOutputIndex = 0;
+  let nextOutputIndex = startOutputIndex;
   let usage: ChatCompletionUsage | undefined;
+  let serviceTier: string | null = null;
+  let finishReason: string | null = null;
 
   const nextSeq = () => seq++;
 
   for await (const chunk of chunks) {
     if (chunk.usage) usage = chunk.usage;
+    if (chunk.service_tier) serviceTier = chunk.service_tier;
     const choice = chunk.choices?.[0];
     if (!choice) continue;
     const delta = choice.delta ?? {};
@@ -305,6 +323,7 @@ export async function* translateChunkStream(
 
     // --- finish ---
     if (choice.finish_reason) {
+      finishReason = choice.finish_reason;
       if (reasoningItem) {
         reasoningItem.status = "completed";
         reasoningItem.content = [
@@ -396,5 +415,5 @@ export async function* translateChunkStream(
   for (const state of tools.values()) allItems[state.outputIndex] = state.item;
   const items = allItems.filter((x): x is OutputItem => !!x);
 
-  return { items, usage: translateUsage(usage) };
+  return { items, usage: translateUsage(usage), serviceTier, finishReason };
 }

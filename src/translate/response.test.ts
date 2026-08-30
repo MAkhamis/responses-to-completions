@@ -57,3 +57,69 @@ describe("translateUsage cost passthrough", () => {
     expect(usage).not.toHaveProperty("cost");
   });
 });
+
+describe("translateUsage token details", () => {
+  it("carries cache_write_tokens (GPT-5.6+ billable cache writes)", () => {
+    const usage = translateUsage({
+      prompt_tokens: 2600,
+      completion_tokens: 5,
+      total_tokens: 2605,
+      prompt_tokens_details: { cached_tokens: 2000, cache_write_tokens: 400 },
+    });
+
+    expect(usage?.input_tokens_details).toEqual({
+      cached_tokens: 2000,
+      cache_write_tokens: 400,
+    });
+  });
+
+  it("preserves detail fields it does not model explicitly", () => {
+    const usage = translateUsage({
+      prompt_tokens: 10,
+      completion_tokens: 5,
+      total_tokens: 15,
+      prompt_tokens_details: { audio_tokens: 3 },
+      completion_tokens_details: { audio_tokens: 2 },
+    });
+
+    expect(usage?.input_tokens_details).toEqual({
+      audio_tokens: 3,
+      cached_tokens: 0,
+    });
+    expect(usage?.output_tokens_details).toEqual({
+      audio_tokens: 2,
+      reasoning_tokens: 0,
+    });
+  });
+
+  it("defaults cached_tokens to 0 when details are reported without it", () => {
+    const usage = translateUsage({
+      prompt_tokens: 10,
+      completion_tokens: 5,
+      total_tokens: 15,
+      prompt_tokens_details: {},
+    });
+
+    expect(usage?.input_tokens_details).toEqual({ cached_tokens: 0 });
+  });
+
+  it("drops null detail values instead of leaking them into number fields", () => {
+    // OpenRouter-style backends normalize absent detail fields to JSON null.
+    const usage = translateUsage({
+      prompt_tokens: 10,
+      completion_tokens: 5,
+      total_tokens: 15,
+      prompt_tokens_details: { cached_tokens: 0, audio_tokens: null } as never,
+      completion_tokens_details: {
+        reasoning_tokens: null,
+        audio_tokens: 3,
+      } as never,
+    });
+
+    expect(usage?.input_tokens_details).toEqual({ cached_tokens: 0 });
+    expect(usage?.output_tokens_details).toEqual({
+      reasoning_tokens: 0,
+      audio_tokens: 3,
+    });
+  });
+});

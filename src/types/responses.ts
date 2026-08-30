@@ -43,9 +43,7 @@ export interface RefusalContent {
 }
 
 export type InputContentPart =
-  | InputTextContent
-  | InputImageContent
-  | InputFileContent;
+  InputTextContent | InputImageContent | InputFileContent;
 
 export type OutputContentPart = OutputTextContent | RefusalContent;
 
@@ -109,6 +107,7 @@ export interface McpListToolsItem {
     input_schema: Record<string, unknown>;
     annotations?: Record<string, unknown>;
   }>;
+  error?: string | null;
 }
 
 /** Emitted each time the model invokes an MCP tool (resolved server-side). */
@@ -212,7 +211,10 @@ export interface CreateResponseRequest {
   max_output_tokens?: number;
   max_tool_calls?: number;
   metadata?: Record<string, string>;
-  reasoning?: { effort?: "minimal" | "low" | "medium" | "high"; summary?: "auto" | "concise" | "detailed" };
+  reasoning?: {
+    effort?: "minimal" | "low" | "medium" | "high";
+    summary?: "auto" | "concise" | "detailed";
+  };
   service_tier?: "auto" | "default" | "flex" | "priority";
   text?: { format?: ResponseTextFormat; verbosity?: "low" | "medium" | "high" };
   include?: string[];
@@ -223,13 +225,35 @@ export interface CreateResponseRequest {
 export type ResponseTextFormat =
   | { type: "text" }
   | { type: "json_object" }
-  | { type: "json_schema"; name: string; schema: Record<string, unknown>; strict?: boolean; description?: string };
+  | {
+      type: "json_schema";
+      name: string;
+      schema: Record<string, unknown>;
+      strict?: boolean;
+      description?: string;
+    };
+
+export interface InputTokensDetails {
+  cached_tokens?: number;
+  /**
+   * Input tokens written to the cache. Only reported on GPT-5.6 and later,
+   * where writes are billed at 1.25x the uncached input rate (earlier models
+   * cache for free and omit the field).
+   */
+  cache_write_tokens?: number;
+  [k: string]: number | undefined;
+}
+
+export interface OutputTokensDetails {
+  reasoning_tokens?: number;
+  [k: string]: number | undefined;
+}
 
 export interface Usage {
   input_tokens: number;
-  input_tokens_details?: { cached_tokens?: number };
+  input_tokens_details?: InputTokensDetails;
   output_tokens: number;
-  output_tokens_details?: { reasoning_tokens?: number };
+  output_tokens_details?: OutputTokensDetails;
   total_tokens: number;
   cost?: number;
   cost_details?: UsageCostDetails;

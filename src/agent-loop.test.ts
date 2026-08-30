@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { AgentLoop } from "./agent-loop.js";
+import { AgentLoop, mergeUsage } from "./agent-loop.js";
 import type { BackendAdapter } from "./backend/adapter.js";
 import type {
+  ChatCompletionChunk,
   ChatCompletionRequest,
   ChatCompletionResponse,
 } from "./types/completions.js";
@@ -129,6 +130,62 @@ describe("buildChatRequest translation (via AgentLoop.run)", () => {
   });
 });
 
+describe("mergeUsage token details", () => {
+  it("sums cache reads and writes across iterations", () => {
+    const merged = mergeUsage(
+      {
+        input_tokens: 100,
+        output_tokens: 10,
+        total_tokens: 110,
+        input_tokens_details: { cached_tokens: 0, cache_write_tokens: 96 },
+        output_tokens_details: { reasoning_tokens: 4 },
+      },
+      {
+        input_tokens: 120,
+        output_tokens: 8,
+        total_tokens: 128,
+        input_tokens_details: { cached_tokens: 96, cache_write_tokens: 16 },
+        output_tokens_details: { reasoning_tokens: 2 },
+      },
+    );
+
+    expect(merged).toEqual({
+      input_tokens: 220,
+      output_tokens: 18,
+      total_tokens: 238,
+      input_tokens_details: { cached_tokens: 96, cache_write_tokens: 112 },
+      output_tokens_details: { reasoning_tokens: 6 },
+    });
+  });
+
+  it("keeps details reported by only one iteration", () => {
+    const merged = mergeUsage(
+      { input_tokens: 5, output_tokens: 1, total_tokens: 6 },
+      {
+        input_tokens: 7,
+        output_tokens: 1,
+        total_tokens: 8,
+        input_tokens_details: { cached_tokens: 4, cache_write_tokens: 3 },
+      },
+    );
+
+    expect(merged?.input_tokens_details).toEqual({
+      cached_tokens: 4,
+      cache_write_tokens: 3,
+    });
+  });
+
+  it("omits details entirely when neither iteration reports them", () => {
+    const merged = mergeUsage(
+      { input_tokens: 5, output_tokens: 1, total_tokens: 6 },
+      { input_tokens: 7, output_tokens: 1, total_tokens: 8 },
+    );
+
+    expect(merged).not.toHaveProperty("input_tokens_details");
+    expect(merged).not.toHaveProperty("output_tokens_details");
+  });
+});
+
 describe("responses pass-through request building", () => {
   const passthroughBackend = (
     captured: CreateResponseRequest[],
@@ -163,7 +220,7 @@ describe("responses pass-through request building", () => {
     },
   });
 
-  it("strips signal/conversation/store and keeps service_tier + reasoning", async () => {
+  it("strips signal/conversation, forwards store, keeps service_tier + reasoning", async () => {
     const captured: CreateResponseRequest[] = [];
     const agent = new AgentLoop({ backend: passthroughBackend(captured) });
 
@@ -183,12 +240,111 @@ describe("responses pass-through request building", () => {
     });
 
     expect(captured).toHaveLength(1);
-    const body = captured[0] as Record<string, unknown>;
+    const body = captured[0] as unknown as Record<string, unknown>;
     expect(body).not.toHaveProperty("signal");
     expect(body).not.toHaveProperty("conversation");
-    expect(body).not.toHaveProperty("store");
+    expect(body.store).toBe(true);
     expect(body).not.toHaveProperty("previous_response_id");
     expect(body.service_tier).toBe("priority");
     expect(body.reasoning).toEqual({ effort: "medium", summary: "auto" });
+  });
+});
+
+describe("served service_tier propagation", () => {
+  it("surfaces the tier the backend actually served on run()", async () => {
+    const agent = new AgentLoop({
+      backend: {
+        name: "tiered",
+        mode: "completions",
+        complete: async () => ({ ...completion(), service_tier: "default" }),
+      },
+    });
+
+    const result = await agent.run({
+      request: { model: "test-model", input: "hi", service_tier: "priority" },
+      history: [],
+    });
+
+    expect(result.serviceTier).toBe("default");
+  });
+
+  it("leaves serviceTier null when the backend reports none", async () => {
+    const captured: ChatCompletionRequest[] = [];
+    const agent = new AgentLoop({ backend: captureBackend(captured) });
+
+    const result = await agent.run({
+      request: { model: "test-model", input: "hi", service_tier: "priority" },
+      history: [],
+    });
+
+    expect(result.serviceTier).toBeNull();
+  });
+
+  it("surfaces the served tier from stream chunks", async () => {
+    const chunk = (
+      delta: ChatCompletionChunk["choices"][0]["delta"],
+      finish: ChatCompletionChunk["choices"][0]["finish_reason"] = null,
+      extra: Partial<ChatCompletionChunk> = {},
+    ): ChatCompletionChunk => ({
+      id: "chatcmpl-1",
+      object: "chat.completion.chunk",
+      created: 1,
+      model: "test-model",
+      choices: [{ index: 0, delta, finish_reason: finish }],
+      ...extra,
+    });
+
+    const agent = new AgentLoop({
+      backend: {
+        name: "tiered-stream",
+        mode: "completions",
+        stream: async function* () {
+          yield chunk({ role: "assistant", content: "he" });
+          yield chunk({ content: "y" }, null, { service_tier: "default" });
+          yield chunk({}, "stop");
+        },
+      },
+    });
+
+    const gen = agent.stream({
+      request: { model: "test-model", input: "hi", service_tier: "priority" },
+      history: [],
+    });
+    let result;
+    while (true) {
+      const r = await gen.next();
+      if (r.done) {
+        result = r.value;
+        break;
+      }
+    }
+
+    expect(result.serviceTier).toBe("default");
+  });
+});
+
+describe("backend resolution", () => {
+  const named = (name: string, hits: string[]): BackendAdapter => ({
+    name,
+    mode: "completions",
+    complete: async () => {
+      hits.push(name);
+      return completion(`from-${name}`);
+    },
+  });
+
+  it("runs against the backend it was constructed with", async () => {
+    const hits: string[] = [];
+    const agent = new AgentLoop({ backend: named("constructed", hits) });
+
+    await agent.run({ request: { model: "m", input: "hi" }, history: [] });
+
+    expect(hits).toEqual(["constructed"]);
+  });
+
+  it("requires a backend at construction", () => {
+    // @ts-expect-error — `backend` is not optional; a loop with no backend to
+    // call is not constructible, rather than failing on first use.
+    expect(() => new AgentLoop({})).not.toThrow();
   });
 });

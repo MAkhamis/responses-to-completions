@@ -93,6 +93,7 @@ export class OpenAICompatAdapter implements BackendAdapter {
     req: ChatCompletionRequest,
     signal?: AbortSignal,
   ): Promise<ChatCompletionResponse> {
+    assertNoUrlFileData(req);
     const res = await this.fetch(`${this.baseUrl}/chat/completions`, {
       method: "POST",
       headers: this.headers(),
@@ -110,6 +111,7 @@ export class OpenAICompatAdapter implements BackendAdapter {
     req: ChatCompletionRequest,
     signal?: AbortSignal,
   ): AsyncGenerator<ChatCompletionChunk> {
+    assertNoUrlFileData(req);
     const res = await this.fetch(`${this.baseUrl}/chat/completions`, {
       method: "POST",
       headers: this.headers({ accept: "text/event-stream" }),
@@ -182,6 +184,46 @@ export class OpenAICompatAdapter implements BackendAdapter {
     }
     return (await res.json()) as EmbeddingsResponse;
   }
+}
+
+/**
+ * Chat-completions backends behind this adapter take documents as base64
+ * `file_data` or an uploaded `file_id` only — a plain URL in `file_data` is
+ * an OpenRouter file-parser extension (the translator maps
+ * `input_file.file_url` there for `OpenRouterAdapter` to consume).
+ *
+ */
+function assertNoUrlFileData(req: ChatCompletionRequest): void {
+  for (const msg of req.messages) {
+    if (!Array.isArray(msg.content)) continue;
+    for (const part of msg.content) {
+      if (part.type !== "file") continue;
+      const data = part.file.file_data;
+      if (!data || isBase64Document(data)) continue;
+      throw new Error(
+        `input_file: this backend takes documents as base64 \`file_data\` or an uploaded \`file_id\`, and "${excerpt(data)}" is neither. Inline the file as base64 \`file_data\` (optionally as a \`data:\` URI), upload it and pass \`file_id\`, or use a backend that accepts URLs — source "openRouter", or OpenAI's Responses endpoint via \`endpoint: "responses"\`.`,
+      );
+    }
+  }
+}
+
+/** A `data:` URI, or a bare base64 payload (no scheme, path, or dot). */
+function isBase64Document(data: string): boolean {
+  return /^data:/i.test(data) || /^[A-Za-z0-9+/=\s]+$/.test(data);
+}
+
+/**
+ * The rejected value is quoted back so the caller can see what was wrong with
+ * it, but `file_data` holds whole encoded documents — a base64url-encoded PDF
+ * fails `isBase64Document` and would otherwise put megabytes into
+ * `Error.message`, where it gets logged and re-serialized. The head is enough
+ * to recognize a URL, a path, or a scheme typo.
+ */
+function excerpt(data: string): string {
+  const LIMIT = 120;
+  return data.length <= LIMIT
+    ? data
+    : `${data.slice(0, LIMIT)}… (${data.length} chars)`;
 }
 
 export class BackendError extends Error {
