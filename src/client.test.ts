@@ -815,6 +815,68 @@ describe("option typing (compile-time)", () => {
   });
 });
 
+describe("history-field typing (compile-time)", () => {
+  // Same deal as the block above: `npm run typecheck` is the assertion. The
+  // client's store flag is inferred from the `store` literal, and a client
+  // with no store rejects the two fields only a store can resolve — which
+  // `resolveHistory` would otherwise have to throw on at the call.
+  const stored = new ResponsesClient({
+    source: "openAI",
+    config: { apiKey: "k" },
+    store: true,
+    store_client: "openAI",
+  });
+  const storeless = new ResponsesClient({
+    source: "openAI",
+    config: { apiKey: "k" },
+    store: false,
+  });
+
+  it("takes the history fields on a stored client", () => {
+    const calls = [
+      () => stored.responses.create({ model: "m", input: "i", conversation: "conv_1" }),
+      () => stored.responses.create({ model: "m", input: "i", conversation: { id: "conv_1" } }),
+      () => stored.responses.create({ model: "m", input: "i", previous_response_id: "resp_1" }),
+      // The request-level flag is a different switch and stays available:
+      // read the conversation, don't persist this turn.
+      () =>
+        stored.responses.create({
+          model: "m",
+          input: "i",
+          conversation: "conv_1",
+          store: false,
+        }),
+    ];
+    expect(calls).toHaveLength(4);
+  });
+
+  it("rejects the history fields on a storeless client", () => {
+    const calls = [
+      // @ts-expect-error — `conversation` needs a store on the client.
+      () => storeless.responses.create({ model: "m", input: "i", conversation: "conv_1" }),
+      // @ts-expect-error — so does `previous_response_id`.
+      () => storeless.responses.create({ model: "m", input: "i", previous_response_id: "resp_1" }),
+      // @ts-expect-error — streaming is typed off the same request.
+      () => storeless.responses.create({ model: "m", input: "i", conversation: "c", stream: true }),
+    ];
+    // Everything else about the storeless client is unchanged.
+    const plain = () =>
+      storeless.responses.create({ model: "m", input: "i", store: false });
+    expect(calls).toHaveLength(3);
+    expect(typeof plain).toBe("function");
+  });
+
+  it("stays permissive where the store flag isn't known", () => {
+    // A bare annotation (or a subclass) keeps `boolean`, so both shapes type
+    // and the store check remains the runtime one.
+    const anyClient: ResponsesClient = stored;
+    const alsoAny: ResponsesClient = storeless;
+    const call = () =>
+      anyClient.responses.create({ model: "m", input: "i", conversation: "c" });
+    expect([alsoAny, call]).toHaveLength(2);
+  });
+});
+
 describe("native /responses turns keep the provider's id", () => {
   /**
    * Answers `POST /responses` (and the store's `GET /responses/<id>` and

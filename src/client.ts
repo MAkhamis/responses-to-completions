@@ -155,8 +155,15 @@ export type ResponsesClientOptions =
  * const resp = await client.responses.create({ model: "qwen3", input: "hi" });
  * console.log(resp.output_text);
  * ```
+ *
+ * `HasStore` is inferred from the `store` literal passed to the constructor,
+ * and decides whether `responses.create` accepts the history fields — see
+ * {@link CreateRequestFor}. It is never written by hand: `store: false` gives
+ * `ResponsesClient<false>`, `store: true` gives `ResponsesClient<true>`, and
+ * a `ResponsesClient` with no argument (a bare annotation, a subclass) keeps
+ * the permissive `boolean`.
  */
-export class ResponsesClient {
+export class ResponsesClient<HasStore extends boolean = boolean> {
   /** The source this client serves, or undefined on a store-only client. */
   readonly source: ClientSource | undefined;
 
@@ -240,7 +247,7 @@ export class ResponsesClient {
   }
 
   readonly responses: {
-    create: ResponsesCreateOverloads;
+    create: ResponsesCreateOverloads<HasStore>;
     get(id: string): Promise<ResponseObject | null>;
     del(
       id: string,
@@ -299,7 +306,12 @@ export class ResponsesClient {
     };
   };
 
-  constructor(options: ResponsesClientOptions) {
+  constructor(
+    // `{ store?: HasStore }` is the inference site for the class parameter:
+    // the literal passed for `store` is what tells the request type whether
+    // `conversation`/`previous_response_id` can be resolved.
+    options: ResponsesClientOptions & { store?: HasStore },
+  ) {
     // The public type is a cross-product of source and store unions, which
     // TypeScript won't narrow field-by-field; one internal view of it keeps
     // the checks below readable.
@@ -400,7 +412,7 @@ export class ResponsesClient {
 
     this.responses = {
       create: ((req: CreateResponseRequest & { signal?: AbortSignal }) =>
-        this.createResponse(req)) as ResponsesCreateOverloads,
+        this.createResponse(req)) as ResponsesCreateOverloads<HasStore>,
       get: async (id) => requireStore("responses.get").getResponse(id),
       del: async (id) => {
         const r = await requireStore("responses.del").deleteResponse(id);
@@ -572,18 +584,47 @@ export class ResponsesClient {
 
 // ---- overload typing for client.responses.create -------------------------
 
-interface ResponsesCreateOverloads {
+/**
+ * The two request fields that are answered out of the store rather than by the
+ * model: both name state the client has to read back before it can call.
+ */
+type HistoryFields = Pick<
+  CreateResponseRequest,
+  "conversation" | "previous_response_id"
+>;
+
+/**
+ * The request `responses.create` accepts on a client whose store flag is
+ * `HasStore`.
+ *
+ * Without a store there is nothing for `conversation` or
+ * `previous_response_id` to resolve against — `resolveHistory` can only
+ * throw — so a `ResponsesClient<false>` rejects them at compile time instead.
+ * `HasStore` of `boolean` (an unparameterized `ResponsesClient`, where the
+ * constructor call isn't in view) allows both shapes and leaves the check to
+ * runtime.
+ *
+ * Note this is the *client's* store, not the request's `store` flag: a stored
+ * client may still pass `store: false` to keep one turn out of the store while
+ * reading its history.
+ */
+export type CreateRequestFor<HasStore extends boolean = boolean> = Omit<
+  CreateResponseRequest,
+  keyof HistoryFields
+> &
+  (HasStore extends true
+    ? HistoryFields
+    : { conversation?: never; previous_response_id?: never }) & {
+    signal?: AbortSignal;
+  };
+
+interface ResponsesCreateOverloads<HasStore extends boolean = boolean> {
+  (req: CreateRequestFor<HasStore> & { stream: true }): Promise<StreamResponse>;
   (
-    req: CreateResponseRequest & { stream: true; signal?: AbortSignal },
-  ): Promise<StreamResponse>;
-  (
-    req: CreateResponseRequest & {
-      stream?: false | undefined;
-      signal?: AbortSignal;
-    },
+    req: CreateRequestFor<HasStore> & { stream?: false | undefined },
   ): Promise<ResponseObject>;
   (
-    req: CreateResponseRequest & { signal?: AbortSignal },
+    req: CreateRequestFor<HasStore>,
   ): Promise<ResponseObject | StreamResponse>;
 }
 

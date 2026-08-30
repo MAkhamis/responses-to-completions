@@ -449,6 +449,53 @@ client still runs requests, but `conversations.*` and `responses.{get,del}`
 throw and `responses.create` skips writing. It can also be the *only* half you
 configure — see [Store-only clients](#store-only-clients).
 
+Two different fields are spelled `store`, and they answer different questions.
+The constructor's `store` decides *whether the client has a store at all*; the
+request's `store` decides *whether one turn is written to it*. A turn that
+should read a conversation but leave no trace is the second one — it still
+needs a store to read through:
+
+```ts
+const client = new ResponsesClient({
+  source: "openAI",
+  config: { apiKey: process.env.OPENAI_API_KEY },
+  store: true,
+  store_client: "openAI",
+});
+
+await client.responses.create({
+  model: "gpt-5.6-luna",
+  conversation: "conv_…",   // history is loaded
+  input: "…",
+  store: false,             // this turn is not persisted
+});
+```
+
+So `conversation` and `previous_response_id` require the *constructor* option.
+A client built with `store: false` has nothing to resolve them against, and
+its type says so — the flag is inferred from the `store` literal, so the two
+fields are rejected at compile time rather than at the call:
+
+```ts
+const storeless = new ResponsesClient({
+  source: "openAI",
+  config: { apiKey: process.env.OPENAI_API_KEY },
+  store: false,
+});
+
+await storeless.responses.create({
+  model: "gpt-5.6-luna",
+  input: "…",
+  conversation: "conv_…",  // ← Type 'string' is not assignable to type 'undefined'
+});
+```
+
+The inference reads the literal you passed, so it applies to `store: false`
+and `store: true`. Omitting `store` altogether (and any client whose
+construction isn't in view — a bare `ResponsesClient` annotation, a subclass)
+keeps the permissive `boolean` flag and the runtime check. `CreateRequestFor`
+is exported if you want to name either request shape.
+
 ### `store_client: "S3"` — for production
 
 ```ts

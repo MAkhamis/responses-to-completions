@@ -107,6 +107,7 @@ export interface McpListToolsItem {
     input_schema: Record<string, unknown>;
     annotations?: Record<string, unknown>;
   }>;
+  error?: string | null;
 }
 
 /** Emitted each time the model invokes an MCP tool (resolved server-side). */

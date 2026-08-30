@@ -37,7 +37,7 @@ export async function resolveHistory(args: {
   if (request.conversation) {
     if (!store) {
       throw new Error(
-        "A store is required to use `conversation`. Pass `store` when constructing ResponsesClient.",
+        "A store is required to use `conversation`. This client was constructed without one — pass `store: true` with a `store_client` (\"openAI\", \"S3\" or \"local\"). The request-level `store: false` is a different switch: it keeps a turn out of an existing store, and still needs that store to read the conversation.",
       );
     }
     const convId =
@@ -64,7 +64,7 @@ export async function resolveHistory(args: {
   if (request.previous_response_id) {
     if (!store) {
       throw new Error(
-        "A store is required to use `previous_response_id`. Pass `store` when constructing ResponsesClient.",
+        "A store is required to use `previous_response_id`. This client was constructed without one — pass `store: true` with a `store_client` (\"openAI\", \"S3\" or \"local\"). The request-level `store: false` is a different switch: it keeps a turn out of an existing store, and still needs that store to read the prior response.",
       );
     }
     const prev = await store.getResponse(request.previous_response_id, signal);

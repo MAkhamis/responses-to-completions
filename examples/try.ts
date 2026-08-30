@@ -13,16 +13,38 @@ import type { StreamEvent } from "../src/translate/stream.js";
 
 const AIClient = new ResponsesClient({
   store: true,
-  store_client: "openAI",
+  store_client: "S3",
+  store_config: {
+    bucket: process.env.STORE_S3_BUCKET!,
+    prefix: "MY_PREF",
+    clientConfig: {
+      region: process.env.STORE_S3_REGION,
+      credentials: {
+        accessKeyId: process.env.STORE_S3_ACCESS_KEY_ID!,
+        secretAccessKey: process.env.STORE_S3_SECRET_ACCESS_KEY!,
+      },
+    },
+  },
+  config: { apiKey: process.env.OPENAI_API_KEY! },
+  source: "openAI",
+});
+/**
+ * No store: plain one-shot turns only. `conversation` and
+ * `previous_response_id` don't type-check on this client — there is nothing
+ * for them to resolve against — so its type says so instead of the call
+ * throwing.
+ */
+const StorelessClient = new ResponsesClient({
+  store: false,
   config: { apiKey: process.env.OPENAI_API_KEY! },
   source: "openAI",
 });
 
 // 1. Plain call — `input` is a string, the reply is on `output_text`.
 async function basic() {
-  const result = await AIClient.responses.create({
+  const result = await StorelessClient.responses.create({
     model: "gpt-5.6-luna",
-    input: "Give me one sentence about the Dead Sea.",
+    input: "Give me a story about the secret word",
     stream: false,
   });
 
@@ -135,13 +157,16 @@ async function structured() {
 async function conversation() {
   const conv = await AIClient.conversations.create({
     metadata: { user: "u_42" },
+
   });
+
+  console.log(conv.id);
 
   await AIClient.responses.create({
     model: "gpt-5.6-luna",
     conversation: conv.id,
     input: "Remember the secret word 'banana'.",
-    stream: false,
+    stream: false,    
   });
 
   const second = await AIClient.responses.create({
@@ -162,6 +187,21 @@ async function conversation() {
     { type: "message", role: "user", content: "Noted." },
   ]);
   await AIClient.conversations.del(conv.id);
+}
+
+// 7b. An ephemeral turn on a stored conversation — the request-level `store`
+//     is a different switch from the constructor's: the history is still read
+//     out of the store, only this turn is not written to it.
+async function conversationWithoutPersisting(convId: string) {
+  const result = await AIClient.responses.create({
+    model: "gpt-5.6-luna",
+    conversation: convId,
+    input: "What was the secret word?",
+    store: false,
+    stream: false,
+  });
+
+  console.log(result.output_text);
 }
 
 // 8. Same continuity without a conversation id — chain by response id.
@@ -324,15 +364,16 @@ async function storeFailureKeepsTheTurn() {
 }
 
 const main = async () => {
-  await basic();
-  await withInstructions();
-  await multiTurn();
-  await streaming();
-  await withTools();
-  await structured();
-  await conversation();
-  await previousResponse();
-  await storeFailureKeepsTheTurn();
+  // await basic();
+  // await withInstructions();
+  // await multiTurn();
+  // await streaming();
+  // await withTools();
+  // await structured();
+  // await conversation();
+  // await conversationWithoutPersisting("conv_…");
+  // await previousResponse();
+  // await storeFailureKeepsTheTurn();
 };
 
 main().catch((err) => {

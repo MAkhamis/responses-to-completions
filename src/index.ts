@@ -12,6 +12,7 @@ export {
   StreamResponse,
   StorePersistenceError,
   type ResponsesClientOptions,
+  type CreateRequestFor,
   type ClientSource,
 } from "./client.js";
 

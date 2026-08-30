@@ -529,10 +529,8 @@ export class AgentLoop {
           id: genMcpListId(),
           server_label: tool.server_label,
           tools: [],
-          // OpenAI's shape doesn't carry an error field here; we surface via metadata
-          // conventions most clients ignore, but callers can inspect it.
-          ...({ error: msg } as Record<string, unknown>),
-        } as McpListToolsItem);
+          error: msg,
+        });
         continue;
       }
 
