@@ -746,7 +746,36 @@ environment variables.
 | `store` | `false` | `true` to persist — required for conversations and `responses.{get,del}`, and required outright when `source` is omitted |
 | `store_client` | — (required with `store`) | `"S3"`, `"local"`, or `"openAI"` when `source` is `"openAI"` |
 | `store_config` | — (required for `"S3"`/`"local"`) | `{ bucket, prefix?, … }`, `{ dir }`, or the OpenAI store's options |
-| `maxIterations` | `10` | Hard cap on backend round-trips per request |
+| `maxIterations` | `30` | Default hard cap on backend round-trips per request; a request's own `maxIterations` overrides it |
+
+### `maxIterations`
+
+`maxIterations` bounds the chat-completions agent loop. Every backend call
+counts, so a turn that keeps executing MCP tools stops after that many
+round-trips and comes back `incomplete` with
+`incomplete_details.reason: "max_tool_calls"`. A turn that finishes earlier
+is unaffected. Set it on a request to override the client's value for that
+turn — a positive integer, validated before anything is sent:
+
+```ts
+await client.responses.create({
+  model: "gpt-4o-mini",
+  tools: [
+    {
+      type: "mcp",
+      server_label: "docs",
+      server_url: "https://docs.example.com/mcp",
+    },
+  ],
+  input: "Find every mention of rate limits.",
+  maxIterations: 25,
+});
+```
+
+The field is a package extension, not part of the Responses API, and is
+stripped before a request is forwarded to a native `/responses` backend
+(`endpoint: "responses"`). That path makes a single upstream call, and the
+provider's own `max_tool_calls` governs its server-side tools instead.
 
 ## Advanced usage
 
