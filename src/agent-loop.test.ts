@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentLoop, mergeUsage } from "./agent-loop.js";
 import type { BackendAdapter } from "./backend/adapter.js";
 import type {
@@ -220,7 +220,7 @@ describe("responses pass-through request building", () => {
     },
   });
 
-  it("strips signal/conversation, forwards store, keeps service_tier + reasoning", async () => {
+  it("strips signal/conversation/maxIterations, forwards store, keeps service_tier + reasoning", async () => {
     const captured: CreateResponseRequest[] = [];
     const agent = new AgentLoop({ backend: passthroughBackend(captured) });
 
@@ -234,6 +234,7 @@ describe("responses pass-through request building", () => {
         service_tier: "priority",
         reasoning: { effort: "medium", summary: "auto" },
         signal: ctrl.signal,
+        maxIterations: 4,
       } as CreateResponseRequest & { signal?: AbortSignal },
       history: [],
       signal: ctrl.signal,
@@ -242,6 +243,7 @@ describe("responses pass-through request building", () => {
     expect(captured).toHaveLength(1);
     const body = captured[0] as unknown as Record<string, unknown>;
     expect(body).not.toHaveProperty("signal");
+    expect(body).not.toHaveProperty("maxIterations");
     expect(body).not.toHaveProperty("conversation");
     expect(body.store).toBe(true);
     expect(body).not.toHaveProperty("previous_response_id");
@@ -346,5 +348,260 @@ describe("backend resolution", () => {
     // @ts-expect-error — `backend` is not optional; a loop with no backend to
     // call is not constructible, rather than failing on first use.
     expect(() => new AgentLoop({})).not.toThrow();
+  });
+});
+
+// ---- maxIterations ----------------------------------------------------------
+
+// The loop opens MCP connections itself, so the connection class is swapped for
+// an in-memory fake that records every tool call it executes.
+const mcpState = vi.hoisted(() => ({ calls: [] as string[] }));
+
+vi.mock("./mcp/client.js", async (importOriginal) => {
+  const mod = await importOriginal<typeof import("./mcp/client.js")>();
+  class FakeMcpConnection {
+    constructor(public readonly def: unknown) {}
+    async listTools() {
+      return [
+        {
+          name: "lookup",
+          description: "Looks something up.",
+          input_schema: { type: "object", properties: {} },
+        },
+      ];
+    }
+    async call(name: string) {
+      mcpState.calls.push(name);
+      return { output: `result-${mcpState.calls.length}`, isError: false };
+    }
+    async close() {}
+  }
+  return { ...mod, McpConnection: FakeMcpConnection };
+});
+
+const mcpTool = {
+  type: "mcp" as const,
+  server_label: "docs",
+  server_url: "https://docs.example.test/mcp",
+  require_approval: "never" as const,
+};
+
+const toolCallCompletion = (n: number): ChatCompletionResponse => ({
+  id: `chatcmpl-${n}`,
+  object: "chat.completion",
+  created: 1,
+  model: "test-model",
+  choices: [
+    {
+      index: 0,
+      message: {
+        role: "assistant",
+        content: null,
+        tool_calls: [
+          {
+            id: `call_${n}`,
+            type: "function",
+            function: { name: "lookup", arguments: "{}" },
+          },
+        ],
+      },
+      finish_reason: "tool_calls",
+    },
+  ],
+  usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+});
+
+/** A model that never stops calling the MCP tool — only the cap ends the turn. */
+const relentlessBackend = (
+  captured: ChatCompletionRequest[],
+): BackendAdapter => ({
+  name: "relentless",
+  mode: "completions",
+  complete: async (req) => {
+    captured.push(req);
+    return toolCallCompletion(captured.length);
+  },
+});
+
+const streamChunk = (
+  delta: ChatCompletionChunk["choices"][0]["delta"],
+  finish: ChatCompletionChunk["choices"][0]["finish_reason"] = null,
+): ChatCompletionChunk => ({
+  id: "chatcmpl-1",
+  object: "chat.completion.chunk",
+  created: 1,
+  model: "test-model",
+  choices: [{ index: 0, delta, finish_reason: finish }],
+});
+
+describe("maxIterations", () => {
+  beforeEach(() => {
+    mcpState.calls.length = 0;
+  });
+
+  it("a request-level maxIterations overrides the client-level cap", async () => {
+    const captured: ChatCompletionRequest[] = [];
+    const agent = new AgentLoop({
+      backend: relentlessBackend(captured),
+      maxIterations: 5,
+    });
+
+    const result = await agent.run({
+      request: {
+        model: "test-model",
+        input: "hi",
+        tools: [mcpTool],
+        maxIterations: 2,
+      },
+      history: [],
+    });
+
+    expect(captured).toHaveLength(2);
+    expect(mcpState.calls).toHaveLength(2);
+    expect(result.status).toBe("incomplete");
+    expect(result.incompleteDetails).toEqual({ reason: "max_tool_calls" });
+    expect(result.items.filter((it) => it.type === "mcp_call")).toHaveLength(2);
+    expect(result.items.some((it) => it.type === "function_call")).toBe(false);
+  });
+
+  it("falls back to the client-level cap when the request sets none", async () => {
+    const captured: ChatCompletionRequest[] = [];
+    const agent = new AgentLoop({
+      backend: relentlessBackend(captured),
+      maxIterations: 3,
+    });
+
+    const result = await agent.run({
+      request: { model: "test-model", input: "hi", tools: [mcpTool] },
+      history: [],
+    });
+
+    expect(captured).toHaveLength(3);
+    expect(result.status).toBe("incomplete");
+  });
+
+  it("defaults to 30 round-trips when neither the request nor the client sets one", async () => {
+    const captured: ChatCompletionRequest[] = [];
+    const agent = new AgentLoop({ backend: relentlessBackend(captured) });
+
+    const result = await agent.run({
+      request: { model: "test-model", input: "hi", tools: [mcpTool] },
+      history: [],
+    });
+
+    expect(captured).toHaveLength(30);
+    expect(result.status).toBe("incomplete");
+  });
+
+  it("is a ceiling, not a count — a turn that ends on its own is untouched", async () => {
+    const captured: ChatCompletionRequest[] = [];
+    const agent = new AgentLoop({
+      backend: {
+        name: "answers-second-time",
+        mode: "completions",
+        complete: async (req) => {
+          captured.push(req);
+          return captured.length === 1
+            ? toolCallCompletion(1)
+            : completion("done");
+        },
+      },
+    });
+
+    const result = await agent.run({
+      request: {
+        model: "test-model",
+        input: "hi",
+        tools: [mcpTool],
+        maxIterations: 5,
+      },
+      history: [],
+    });
+
+    expect(captured).toHaveLength(2);
+    expect(mcpState.calls).toHaveLength(1);
+    expect(result.status).toBeUndefined();
+    expect(result.incompleteDetails).toBeUndefined();
+  });
+
+  it.each([0, -1, 1.5])(
+    "rejects %s as a request-level maxIterations before touching backend or MCP",
+    async (bad) => {
+      const captured: ChatCompletionRequest[] = [];
+      const agent = new AgentLoop({ backend: relentlessBackend(captured) });
+
+      await expect(
+        agent.run({
+          request: {
+            model: "test-model",
+            input: "hi",
+            tools: [mcpTool],
+            maxIterations: bad,
+          },
+          history: [],
+        }),
+      ).rejects.toThrow("`maxIterations` must be a positive integer");
+
+      expect(captured).toHaveLength(0);
+      expect(mcpState.calls).toHaveLength(0);
+    },
+  );
+
+  it("honors the request-level cap when streaming", async () => {
+    let calls = 0;
+    const backend: BackendAdapter = {
+      name: "relentless-stream",
+      mode: "completions",
+      stream: async function* () {
+        calls++;
+        yield streamChunk({
+          role: "assistant",
+          tool_calls: [
+            {
+              index: 0,
+              id: `call_${calls}`,
+              type: "function",
+              function: { name: "lookup", arguments: "" },
+            },
+          ],
+        });
+        yield streamChunk({
+          tool_calls: [{ index: 0, function: { arguments: "{}" } }],
+        });
+        yield streamChunk({}, "tool_calls");
+      },
+    };
+    const agent = new AgentLoop({ backend, maxIterations: 5 });
+
+    const gen = agent.stream({
+      request: {
+        model: "test-model",
+        input: "hi",
+        tools: [mcpTool],
+        maxIterations: 2,
+      },
+      history: [],
+    });
+    const mcpCallsDone: string[] = [];
+    let result;
+    while (true) {
+      const r = await gen.next();
+      if (r.done) {
+        result = r.value;
+        break;
+      }
+      if (
+        r.value.type === "response.output_item.done" &&
+        r.value.item.type === "mcp_call"
+      ) {
+        mcpCallsDone.push(r.value.item.name);
+      }
+    }
+
+    expect(calls).toBe(2);
+    expect(mcpState.calls).toHaveLength(2);
+    expect(mcpCallsDone).toEqual(["lookup", "lookup"]);
+    expect(result.status).toBe("incomplete");
+    expect(result.incompleteDetails).toEqual({ reason: "max_tool_calls" });
   });
 });

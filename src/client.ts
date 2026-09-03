@@ -1,4 +1,8 @@
-import { AgentLoop, type AgentRunResult } from "./agent-loop.js";
+import {
+  AgentLoop,
+  resolveMaxIterations,
+  type AgentRunResult,
+} from "./agent-loop.js";
 import type { BackendAdapter } from "./backend/adapter.js";
 import {
   createBackendForSource,
@@ -82,7 +86,10 @@ interface SourceNone {
 }
 
 interface ClientCommonOptions {
-  /** Hard cap on backend round-trips per `responses.create` call. Default 10. */
+  /**
+   * Default hard cap on backend round-trips per `responses.create` call. A
+   * request's own `maxIterations` overrides it for that turn. Default 30.
+   */
   maxIterations?: number;
 }
 
@@ -507,6 +514,7 @@ export class ResponsesClient<HasStore extends boolean = boolean> {
     if (req.input === undefined && !req.previous_response_id) {
       throw new Error("`input` or `previous_response_id` is required");
     }
+    resolveMaxIterations(req, this.maxIterations);
 
     const store = this.store;
     const { history, conversationId, inputItems } = await resolveHistory({
