@@ -1286,3 +1286,28 @@ describe("native /responses turns keep the provider's id", () => {
     ]);
   });
 });
+
+describe("request-level maxIterations", () => {
+  const neverFetch = (async () => {
+    throw new Error("backend must not be contacted");
+  }) as unknown as typeof fetch;
+
+  it.each([false, true])(
+    "rejects an invalid value before contacting the backend (stream: %s)",
+    async (stream) => {
+      const client = new ResponsesClient({
+        source: "openAI",
+        config: { apiKey: "sk-a", fetch: neverFetch },
+      });
+
+      await expect(
+        client.responses.create({
+          model: "m",
+          input: "hi",
+          maxIterations: 0,
+          stream,
+        }),
+      ).rejects.toThrow("`maxIterations` must be a positive integer");
+    },
+  );
+});

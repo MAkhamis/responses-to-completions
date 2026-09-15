@@ -49,8 +49,36 @@ import type { ConversationItem } from "./store/store.js";
 export interface AgentLoopDeps {
   /** Backend every run goes to. */
   backend: BackendAdapter;
-  /** Hard cap on backend round-trips per /v1/responses call. */
+  /**
+   * Default hard cap on backend round-trips per /v1/responses call, used when
+   * the request carries no `maxIterations` of its own. Falls back to
+   * {@link DEFAULT_MAX_ITERATIONS}.
+   */
   maxIterations?: number;
+}
+
+/** Round-trip cap when neither the request nor the client sets one. */
+export const DEFAULT_MAX_ITERATIONS = 30;
+
+/**
+ * Resolves the round-trip cap for one run: the request's `maxIterations`,
+ * else the client's, else {@link DEFAULT_MAX_ITERATIONS}. A request value must
+ * be a positive integer — zero would answer without ever calling the backend,
+ * and a fraction has no meaning as a count. Throws before any backend or MCP
+ * server is contacted so a bad value costs nothing.
+ */
+export function resolveMaxIterations(
+  request: Pick<CreateResponseRequest, "maxIterations">,
+  fallback?: number,
+): number {
+  const own = request.maxIterations;
+  if (own == null) return fallback ?? DEFAULT_MAX_ITERATIONS;
+  if (!Number.isInteger(own) || own < 1) {
+    throw new Error(
+      `\`maxIterations\` must be a positive integer, got ${String(own)}`,
+    );
+  }
+  return own;
 }
 
 /**
@@ -79,12 +107,15 @@ export class AgentLoop {
         `Backend "${backend.name}" declares mode "completions" but does not implement complete().`,
       );
     }
+    const maxIter = resolveMaxIterations(
+      ctx.request,
+      this.deps.maxIterations,
+    );
     const mcpSetup = await this.setupMcp(ctx.request.tools);
     const clientFunctionTools = collectClientFunctionTools(ctx.request.tools);
     const producedItems: OutputItem[] = [...mcpSetup.listItems];
     let usage: Usage | null = null;
     let servedTier: string | null = null;
-    const maxIter = this.deps.maxIterations ?? 10;
 
     try {
       let messages = itemsToMessages(
@@ -209,13 +240,16 @@ export class AgentLoop {
         `Backend "${backend.name}" declares mode "completions" but does not implement stream().`,
       );
     }
+    const maxIter = resolveMaxIterations(
+      ctx.request,
+      this.deps.maxIterations,
+    );
     const mcpSetup = await this.setupMcp(ctx.request.tools);
     const clientFunctionTools = collectClientFunctionTools(ctx.request.tools);
     const producedItems: OutputItem[] = [];
     let usage: Usage | null = null;
     let servedTier: string | null = null;
     let seq = 0;
-    const maxIter = this.deps.maxIterations ?? 10;
 
     // Emit mcp_list_tools items up-front so clients see which tools are available.
     for (const listItem of mcpSetup.listItems) {
@@ -940,8 +974,9 @@ function buildResponsesPassthrough(
   stream: boolean,
 ): CreateResponseRequest {
   const inputItems = combineHistoryAndInput(ctx.history, ctx.request.input);
-  // Conversation state and transport are resolved here, so those keys never
-  // reach the upstream payload.
+  // Conversation state and transport are resolved here, and `maxIterations`
+  // bounds only the local loop, so none of those keys reach the upstream
+  // payload — a native /responses provider would reject the unknown field.
   //
   // `store` is deliberately NOT one of them — it is the caller's persistence
   // opt-out and the provider honors it too. The consequence (not adopting the
@@ -953,6 +988,7 @@ function buildResponsesPassthrough(
     store,
     stream: _st,
     signal: _sig,
+    maxIterations: _mi,
     ...rest
   } = ctx.request as CreateResponseRequest & { signal?: AbortSignal };
   return {

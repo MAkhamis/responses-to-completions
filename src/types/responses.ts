@@ -209,7 +209,13 @@ export interface CreateResponseRequest {
   temperature?: number;
   top_p?: number;
   max_output_tokens?: number;
+  /**
+   * Forwarded verbatim to a native `/responses` backend, where the provider's
+   * own rules apply (OpenRouter caps it at 30). The chat-completions loop does
+   * not read it — that loop is bounded by {@link CreateResponseRequest.maxIterations}.
+   */
   max_tool_calls?: number;
+  maxIterations?: number;
   metadata?: Record<string, string>;
   reasoning?: {
     effort?: "minimal" | "low" | "medium" | "high";
