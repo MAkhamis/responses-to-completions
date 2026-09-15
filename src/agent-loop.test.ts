@@ -6,7 +6,11 @@ import type {
   ChatCompletionRequest,
   ChatCompletionResponse,
 } from "./types/completions.js";
-import type { CreateResponseRequest } from "./types/responses.js";
+import type {
+  CreateResponseRequest,
+  InputItem,
+} from "./types/responses.js";
+import type { ConversationItem } from "./store/store.js";
 
 const completion = (text = "ok"): ChatCompletionResponse => ({
   id: "chatcmpl-1",
@@ -249,6 +253,127 @@ describe("responses pass-through request building", () => {
     expect(body).not.toHaveProperty("previous_response_id");
     expect(body.service_tier).toBe("priority");
     expect(body.reasoning).toEqual({ effort: "medium", summary: "auto" });
+  });
+
+  it("drops history attachment parts that lost their carrier instead of replaying them", async () => {
+    // What OpenAI's Conversations API hands back for a stored image when the
+    // read did not ask for `message.input_image.image_url`: the part is still
+    // there, but with nothing the provider could fetch. Forwarded as-is it
+    // fails the whole turn with "Missing mutually exclusive parameters".
+    const strippedImage = {
+      type: "input_image",
+      detail: "auto",
+      file_id: null,
+      image_url: null,
+    };
+    const history: ConversationItem[] = [
+      { type: "message", role: "system", content: "You review images." },
+      {
+        type: "message",
+        role: "user",
+        content: [
+          { type: "input_text", text: "Review this image" },
+          strippedImage,
+        ],
+      } as unknown as ConversationItem,
+      // An image-only message has nothing left once the part goes; an empty
+      // content array is rejected too, so the item goes with it.
+      {
+        type: "message",
+        role: "user",
+        content: [strippedImage],
+      } as unknown as ConversationItem,
+      // A file whose data was not returned is the same shape of problem.
+      {
+        type: "message",
+        role: "user",
+        content: [
+          { type: "input_text", text: "and this file" },
+          { type: "input_file", file_id: null, file_url: null, file_data: null },
+        ],
+      } as unknown as ConversationItem,
+      // Parts that still carry something are replayed untouched.
+      {
+        type: "message",
+        role: "user",
+        content: [
+          { type: "input_image", image_url: "https://x/img.png", detail: "low" },
+          { type: "input_image", file_id: "file_123" },
+          { type: "input_file", file_data: "JVBERi0=", filename: "a.pdf" },
+        ],
+      } as unknown as ConversationItem,
+      {
+        type: "message",
+        id: "msg_1",
+        role: "assistant",
+        status: "completed",
+        content: [{ type: "output_text", text: "Looks fine." }],
+      },
+    ];
+    const captured: CreateResponseRequest[] = [];
+    const agent = new AgentLoop({ backend: passthroughBackend(captured) });
+
+    await agent.run({
+      request: { model: "test-model", input: "thanks" },
+      history,
+    });
+
+    expect(captured).toHaveLength(1);
+    const input = captured[0].input as InputItem[];
+    expect(input).toEqual([
+      { type: "message", role: "system", content: "You review images." },
+      {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: "Review this image" }],
+      },
+      {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: "and this file" }],
+      },
+      {
+        type: "message",
+        role: "user",
+        content: [
+          { type: "input_image", image_url: "https://x/img.png", detail: "low" },
+          { type: "input_image", file_id: "file_123" },
+          { type: "input_file", file_data: "JVBERi0=", filename: "a.pdf" },
+        ],
+      },
+      {
+        type: "message",
+        id: "msg_1",
+        role: "assistant",
+        status: "completed",
+        content: [{ type: "output_text", text: "Looks fine." }],
+      },
+      { type: "message", role: "user", content: "thanks" },
+    ]);
+    expect(JSON.stringify(input)).not.toContain('"image_url":null');
+  });
+
+  it("forwards a carrier-less part in fresh input untouched, so the provider's own error surfaces", async () => {
+    const captured: CreateResponseRequest[] = [];
+    const agent = new AgentLoop({ backend: passthroughBackend(captured) });
+    const fresh: InputItem[] = [
+      {
+        type: "message",
+        role: "user",
+        content: [
+          { type: "input_text", text: "look" },
+          { type: "input_image" },
+        ],
+      },
+    ];
+
+    await agent.run({
+      request: { model: "test-model", input: fresh },
+      history: [],
+    });
+
+    const input = captured[0].input as InputItem[];
+    expect(input).toEqual(fresh);
   });
 });
 

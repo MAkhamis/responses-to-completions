@@ -18,6 +18,13 @@ export interface OpenAIConversationStoreOptions {
 const MAX_ITEMS_PER_CALL = 20;
 const MAX_LIST_PAGES = 1000;
 
+const ITEM_INCLUDES = ["message.input_image.image_url"] as const;
+
+function withIncludes(qs: URLSearchParams): URLSearchParams {
+  for (const inc of ITEM_INCLUDES) qs.append("include[]", inc);
+  return qs;
+}
+
 export class OpenAIStoreError extends Error {
   constructor(
     public status: number,
@@ -281,7 +288,9 @@ export class OpenAIConversationStore implements Store {
     lastId: string | null;
   }> {
     const clamped = Math.min(100, Math.max(1, Math.trunc(limit)));
-    const qs = new URLSearchParams({ order, limit: String(clamped) });
+    const qs = withIncludes(
+      new URLSearchParams({ order, limit: String(clamped) }),
+    );
     if (after) qs.set("after", after);
     const res = await this.call<{
       data?: ConversationItem[];
@@ -302,9 +311,10 @@ export class OpenAIConversationStore implements Store {
     conversationId: string,
     itemId: string,
   ): Promise<ConversationItem | null> {
+    const qs = withIncludes(new URLSearchParams());
     return this.call<ConversationItem>(
       "GET",
-      `/conversations/${encodeURIComponent(conversationId)}/items/${encodeURIComponent(itemId)}`,
+      `/conversations/${encodeURIComponent(conversationId)}/items/${encodeURIComponent(itemId)}?${qs.toString()}`,
       undefined,
       true,
     );
