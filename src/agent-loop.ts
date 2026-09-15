@@ -11,7 +11,10 @@ import type {
 import type {
   CreateResponseRequest,
   FunctionCallItem,
+  InputFileContent,
+  InputImageContent,
   InputItem,
+  InputMessageItem,
   McpApprovalRequestItem,
   McpApprovalResponseItem,
   McpCallItem,
@@ -967,7 +970,11 @@ function combineHistoryAndInput(
   history: ConversationItem[],
   input: string | InputItem[] | undefined,
 ): InputItem[] {
-  const out: InputItem[] = [...(history as InputItem[])];
+  const out: InputItem[] = [];
+  for (const item of history) {
+    const replayable = dropCarrierlessParts(item);
+    if (replayable) out.push(replayable as InputItem);
+  }
   if (input !== undefined) {
     if (typeof input === "string") {
       out.push({ type: "message", role: "user", content: input });
@@ -976,4 +983,45 @@ function combineHistoryAndInput(
     }
   }
   return out;
+}
+
+/**
+ * A stored message is only replayable if every attachment part still names
+ * something the provider can fetch. OpenAI's Conversations API lists an
+ * `input_image` without its `image_url` unless asked (the store asks — see
+ * `OpenAIConversationStore`), and a part with neither `image_url` nor
+ * `file_id` fails the whole turn with a 400 when it is forwarded as `input`.
+ * Whatever a store hands back, a part with nothing to send is dropped here —
+ * the completions path (`messageContentToChatContent`) already does the same
+ * — and a message left with no content is dropped with it, since an empty
+ * content array is rejected too.
+ *
+ * History only. Fresh input is forwarded as given so a caller's own malformed
+ * part still surfaces as the provider's error rather than vanishing.
+ */
+function dropCarrierlessParts(
+  item: ConversationItem,
+): ConversationItem | null {
+  const t = (item as { type?: string }).type;
+  if (t && t !== "message") return item;
+  const m = item as InputMessageItem;
+  if (!Array.isArray(m.content)) return item;
+  const kept = m.content.filter(hasCarrier);
+  if (kept.length === m.content.length) return item;
+  if (kept.length === 0) return null;
+  return { ...m, content: kept } as ConversationItem;
+}
+
+function hasCarrier(part: unknown): boolean {
+  if (!part || typeof part !== "object") return true;
+  const type = (part as { type?: string }).type;
+  if (type === "input_image") {
+    const img = part as InputImageContent;
+    return Boolean(img.image_url || img.file_id);
+  }
+  if (type === "input_file") {
+    const f = part as InputFileContent;
+    return Boolean(f.file_id || f.file_url || f.file_data);
+  }
+  return true;
 }

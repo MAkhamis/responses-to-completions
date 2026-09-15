@@ -90,6 +90,42 @@ describe("OpenAIConversationStore", () => {
     expect(calls[1].url).toContain("after=i2");
   });
 
+  it("asks OpenAI to include input_image URLs on every listed page and on a single item", async () => {
+    // OpenAI omits `image_url` from listed `input_image` parts unless asked,
+    // and a part with neither `image_url` nor `file_id` is rejected the moment
+    // the history is replayed as `input`.
+    const calls: Call[] = [];
+    const store = new OpenAIConversationStore({
+      apiKey: "sk-test",
+      pageSize: 1,
+      fetch: mockFetch(calls, (url) => {
+        if (url.includes("/items/")) return { json: msg("a", "i1") };
+        if (url.includes("after=i1")) {
+          return {
+            json: { data: [msg("b", "i2")], has_more: false, last_id: "i2" },
+          };
+        }
+        return {
+          json: { data: [msg("a", "i1")], has_more: true, last_id: "i1" },
+        };
+      }),
+    });
+
+    await store.listItems("conv_1");
+    await store.listItems("conv_1", { limit: 5 });
+    await store.getItem("conv_1", "i1");
+
+    expect(calls).toHaveLength(4);
+    for (const call of calls) {
+      expect(decodeURIComponent(call.url)).toContain(
+        "include[]=message.input_image.image_url",
+      );
+    }
+    // The pagination cursor and page size still ride alongside it.
+    expect(decodeURIComponent(calls[1].url)).toContain("after=i1");
+    expect(decodeURIComponent(calls[2].url)).toContain("limit=5");
+  });
+
   it("returns a single page verbatim when the caller sets a limit", async () => {
     const calls: Call[] = [];
     const store = new OpenAIConversationStore({
