@@ -3,11 +3,17 @@
  * Spec references: https://platform.openai.com/docs/api-reference/responses
  *
  * Not exhaustive — covers the subset needed to serve clients talking to a
- * chat-completions backend. Built-in tools other than `mcp` are out of scope
- * for v1 (web_search, file_search, code_interpreter, computer_use, image_gen).
+ * chat-completions backend. Built-in tools: `mcp` runs in the agent loop;
+ * `web_search` and OpenRouter's `openrouter:*` server tools pass through a
+ * native Responses endpoint as-is and, on a chat-completions backend, run on
+ * OpenRouter only (see `collectServerTools`). file_search, code_interpreter,
+ * computer_use and image_gen remain out of scope.
  */
 
-import type { UsageCostDetails } from "./completions.js";
+import type {
+  ServerToolUseDetails,
+  UsageCostDetails,
+} from "./completions.js";
 
 export type Role = "system" | "user" | "assistant" | "developer" | "tool";
 
@@ -31,10 +37,21 @@ export interface InputFileContent {
   filename?: string;
 }
 
+/** A source the text relies on (web search). Offsets may be 0 when unknown. */
+export interface UrlCitationAnnotation {
+  type: "url_citation";
+  url: string;
+  title?: string;
+  start_index: number;
+  end_index: number;
+  /** Excerpt of the page, when the provider sends one (OpenRouter). */
+  content?: string;
+}
+
 export interface OutputTextContent {
   type: "output_text";
   text: string;
-  annotations?: unknown[];
+  annotations?: Array<UrlCitationAnnotation | Record<string, unknown>>;
 }
 
 export interface RefusalContent {
@@ -132,6 +149,45 @@ export interface McpApprovalRequestItem {
   arguments: string;
 }
 
+/**
+ * OpenAI's hosted web search, as it ran — one per action. Only `search`
+ * actions are billed as tool calls; `open_page` / `find_in_page` read a page.
+ */
+export interface WebSearchCallItem {
+  type: "web_search_call";
+  id: string;
+  status: "in_progress" | "searching" | "completed" | "failed";
+  action?:
+    | {
+        type: "search";
+        queries?: string[];
+        query?: string;
+        sources?: Array<{ type: "url"; url: string }>;
+      }
+    | { type: "open_page"; url?: string | null }
+    | { type: "find_in_page"; url: string; pattern: string };
+}
+
+/**
+ * An OpenRouter server tool call as a native Responses endpoint reports it:
+ * `openrouter:web_search` carries `action` (query, sources), and
+ * `openrouter:web_fetch` the page (`url`, `title`, `content`).
+ */
+export interface OpenRouterServerToolCallItem {
+  type: `openrouter:${string}`;
+  id: string;
+  status: "in_progress" | "completed" | "failed";
+  action?: {
+    type?: string;
+    query?: string;
+    sources?: Array<{ type: "url"; url: string }>;
+  };
+  url?: string;
+  title?: string;
+  content?: string;
+  error?: string;
+}
+
 /** Client's approval decision for a previous mcp_approval_request. */
 export interface McpApprovalResponseItem {
   type: "mcp_approval_response";
@@ -154,7 +210,9 @@ export type OutputItem =
   | ReasoningItem
   | McpListToolsItem
   | McpCallItem
-  | McpApprovalRequestItem;
+  | McpApprovalRequestItem
+  | WebSearchCallItem
+  | OpenRouterServerToolCallItem;
 
 // ---- Tools ----------------------------------------------------------------
 
@@ -184,7 +242,69 @@ export type RequireApproval =
   | "never"
   | { never?: { tool_names?: string[] }; always?: { tool_names?: string[] } };
 
-export type ToolDef = FunctionToolDef | McpToolDef;
+export interface WebSearchUserLocation {
+  type?: "approximate";
+  city?: string | null;
+  region?: string | null;
+  country?: string | null;
+  timezone?: string | null;
+}
+
+/**
+ * OpenAI's hosted web search. Forwarded as-is to a native Responses endpoint;
+ * on a chat-completions backend it becomes `openrouter:web_search` (OpenRouter
+ * only — other chat-completions backends have no equivalent and reject it).
+ */
+export interface WebSearchToolDef {
+  type:
+    | "web_search"
+    | "web_search_2025_08_26"
+    | "web_search_preview"
+    | "web_search_preview_2025_03_11";
+  search_context_size?: "low" | "medium" | "high";
+  filters?: { allowed_domains?: string[] | null } | null;
+  user_location?: WebSearchUserLocation | null;
+  external_web_access?: boolean;
+}
+
+/** OpenRouter `openrouter:web_search` parameters (subset; all optional). */
+export interface OpenRouterWebSearchParameters {
+  engine?: "auto" | "native" | "exa" | "firecrawl" | "parallel" | "perplexity";
+  mode?: string;
+  max_results?: number;
+  max_uses?: number;
+  max_total_results?: number;
+  search_context_size?: "low" | "medium" | "high";
+  max_characters?: number;
+  user_location?: Omit<WebSearchUserLocation, "type">;
+  allowed_domains?: string[];
+  excluded_domains?: string[];
+  [k: string]: unknown;
+}
+
+/** OpenRouter `openrouter:web_fetch` parameters (subset; all optional). */
+export interface OpenRouterWebFetchParameters {
+  engine?: "auto" | "native" | "openrouter" | "exa" | "firecrawl" | "parallel";
+  max_uses?: number;
+  max_content_tokens?: number;
+  allowed_domains?: string[];
+  blocked_domains?: string[];
+  [k: string]: unknown;
+}
+
+/**
+ * A tool OpenRouter runs server-side for any tool-calling model. Forwarded
+ * verbatim on both OpenRouter endpoints; other backends reject it.
+ */
+export type OpenRouterServerToolDef =
+  | { type: "openrouter:web_search"; parameters?: OpenRouterWebSearchParameters }
+  | { type: "openrouter:web_fetch"; parameters?: OpenRouterWebFetchParameters };
+
+export type ToolDef =
+  | FunctionToolDef
+  | McpToolDef
+  | WebSearchToolDef
+  | OpenRouterServerToolDef;
 
 export type ToolChoice =
   | "auto"
@@ -263,6 +383,8 @@ export interface Usage {
   total_tokens: number;
   cost?: number;
   cost_details?: UsageCostDetails;
+  /** Provider-run tools (OpenRouter server tools); their fee is in `cost`. */
+  server_tool_use_details?: ServerToolUseDetails;
 }
 
 export type ResponseStatus =

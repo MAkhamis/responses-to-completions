@@ -1,5 +1,6 @@
 import type {
   ChatFunctionTool,
+  ChatServerTool,
   ChatMessage,
   ChatToolCall,
   ChatToolChoice,
@@ -17,6 +18,9 @@ import type {
   ResponseTextFormat,
   ToolChoice,
   ToolDef,
+  OpenRouterServerToolDef,
+  OpenRouterWebSearchParameters,
+  WebSearchToolDef,
 } from "../types/responses.js";
 import type { ConversationItem } from "../store/store.js";
 
@@ -274,6 +278,76 @@ export function translateTools(
     // after mcp_list_tools is resolved; they don't pass through here.
   }
   return out.length ? out : undefined;
+}
+
+const isWebSearchTool = (t: ToolDef): t is WebSearchToolDef =>
+  t.type === "web_search" ||
+  t.type === "web_search_2025_08_26" ||
+  t.type === "web_search_preview" ||
+  t.type === "web_search_preview_2025_03_11";
+
+const isOpenRouterServerTool = (t: ToolDef): t is OpenRouterServerToolDef =>
+  typeof t.type === "string" && t.type.startsWith("openrouter:");
+
+/** Hosted `web_search` options → `openrouter:web_search` parameters. */
+export function webSearchToOpenRouterParameters(
+  t: WebSearchToolDef,
+): OpenRouterWebSearchParameters {
+  const location = t.user_location
+    ? Object.fromEntries(
+        (["city", "region", "country", "timezone"] as const)
+          .filter((k) => t.user_location?.[k])
+          .map((k) => [k, t.user_location![k] as string]),
+      )
+    : undefined;
+  return {
+    ...(t.search_context_size
+      ? { search_context_size: t.search_context_size }
+      : {}),
+    ...(t.filters?.allowed_domains?.length
+      ? { allowed_domains: [...t.filters.allowed_domains] }
+      : {}),
+    ...(location && Object.keys(location).length
+      ? { user_location: location }
+      : {}),
+  };
+}
+
+/**
+ * Provider-run tools for a chat-completions request. OpenRouter runs its
+ * `openrouter:*` server tools for any tool-calling model, so they are
+ * forwarded verbatim and a hosted `web_search` is mapped onto
+ * `openrouter:web_search`. No other chat-completions backend can run them:
+ * rather than silently answering without the tool, the request is refused —
+ * reach OpenAI's hosted tools through `endpoint: "responses"` instead.
+ */
+export function translateServerTools(
+  tools: ToolDef[] | undefined,
+  backendName: string,
+): ChatServerTool[] {
+  const out: ChatServerTool[] = [];
+  for (const t of tools ?? []) {
+    const hosted = isWebSearchTool(t);
+    if (!hosted && !isOpenRouterServerTool(t)) continue;
+    if (backendName !== "openrouter") {
+      throw new Error(
+        `${t.type}: backend "${backendName}" cannot run provider tools on /chat/completions. Use source "openRouter", or a native Responses endpoint (endpoint: "responses") for OpenAI's hosted web search.`,
+      );
+    }
+    if (hosted) {
+      const parameters = webSearchToOpenRouterParameters(t);
+      out.push({
+        type: "openrouter:web_search",
+        ...(Object.keys(parameters).length ? { parameters } : {}),
+      });
+    } else {
+      out.push({
+        type: t.type,
+        ...(t.parameters ? { parameters: { ...t.parameters } } : {}),
+      });
+    }
+  }
+  return out;
 }
 
 export function translateToolChoice(

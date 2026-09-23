@@ -77,11 +77,14 @@ export * from "./types/index.js";
 export {
   itemsToMessages,
   translateTools,
+  translateServerTools,
+  webSearchToOpenRouterParameters,
   translateToolChoice,
   translateResponseFormat,
 } from "./translate/request.js";
 export {
   completionToOutputItems,
+  translateAnnotations,
   translateUsage,
 } from "./translate/response.js";
 export { translateChunkStream, type StreamEvent } from "./translate/stream.js";

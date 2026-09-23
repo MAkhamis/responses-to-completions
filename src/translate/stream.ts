@@ -9,9 +9,10 @@ import type {
   OutputMessageItem,
   ReasoningItem,
   ResponseObject,
+  UrlCitationAnnotation,
 } from "../types/responses.js";
 import { genFcId, genMessageId, genReasoningId } from "../util/ids.js";
-import { translateUsage } from "./response.js";
+import { translateAnnotations, translateUsage } from "./response.js";
 
 /**
  * Any Responses-API streaming event. We model them as tagged unions so the
@@ -49,6 +50,15 @@ export type StreamEvent =
       output_index: number;
       content_index: number;
       delta: string;
+    }
+  | {
+      type: "response.output_text.annotation.added";
+      sequence_number: number;
+      item_id: string;
+      output_index: number;
+      content_index: number;
+      annotation_index: number;
+      annotation: UrlCitationAnnotation;
     }
   | {
       type: "response.output_text.done";
@@ -169,6 +179,8 @@ export async function* translateChunkStream(
   let messageOutputIndex = -1;
   let messageText = "";
   let contentOpen = false;
+  // Citations (web search) arrive in their own delta chunks.
+  const annotations: UrlCitationAnnotation[] = [];
 
   // Tool-call tracking: index (from chunk) → state
   type ToolState = {
@@ -279,6 +291,50 @@ export async function* translateChunkStream(
       };
     }
 
+    // --- citations ---
+    const newAnnotations = translateAnnotations(delta.annotations);
+    if (newAnnotations.length) {
+      if (!messageItem) {
+        messageItem = {
+          type: "message",
+          id: genMessageId(),
+          role: "assistant",
+          status: "in_progress",
+          content: [],
+        };
+        messageOutputIndex = nextOutputIndex++;
+        yield {
+          type: "response.output_item.added",
+          sequence_number: nextSeq(),
+          output_index: messageOutputIndex,
+          item: messageItem,
+        };
+      }
+      if (!contentOpen) {
+        yield {
+          type: "response.content_part.added",
+          sequence_number: nextSeq(),
+          item_id: messageItem.id,
+          output_index: messageOutputIndex,
+          content_index: 0,
+          part: { type: "output_text", text: "", annotations: [] },
+        };
+        contentOpen = true;
+      }
+      for (const annotation of newAnnotations) {
+        annotations.push(annotation);
+        yield {
+          type: "response.output_text.annotation.added",
+          sequence_number: nextSeq(),
+          item_id: messageItem.id,
+          output_index: messageOutputIndex,
+          content_index: 0,
+          annotation_index: annotations.length - 1,
+          annotation,
+        };
+      }
+    }
+
     // --- tool calls ---
     if (delta.tool_calls?.length) {
       for (const tc of delta.tool_calls) {
@@ -364,13 +420,26 @@ export async function* translateChunkStream(
             item_id: messageItem.id,
             output_index: messageOutputIndex,
             content_index: 0,
-            part: { type: "output_text", text: messageText, annotations: [] },
+            part: {
+              type: "output_text",
+              text: messageText,
+              annotations: [...annotations],
+            },
           };
         }
         messageItem.status = "completed";
-        messageItem.content = messageText
-          ? [{ type: "output_text", text: messageText }]
-          : [];
+        messageItem.content =
+          messageText || annotations.length
+            ? [
+                {
+                  type: "output_text",
+                  text: messageText,
+                  ...(annotations.length
+                    ? { annotations: [...annotations] }
+                    : {}),
+                },
+              ]
+            : [];
         yield {
           type: "response.output_item.done",
           sequence_number: nextSeq(),
