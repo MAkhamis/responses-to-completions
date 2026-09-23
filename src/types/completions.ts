@@ -55,6 +55,8 @@ export interface AssistantMessage {
   reasoning_content?: string | null;
   reasoning?: string | null;
   reasoning_details?: ReasoningDetail[] | null;
+  /** Sources behind the text — web search citations. Response side only. */
+  annotations?: ChatUrlCitationAnnotation[] | null;
 }
 
 export interface ToolMessage {
@@ -86,6 +88,30 @@ export interface ChatFunctionTool {
   };
 }
 
+/**
+ * A tool the provider runs itself, forwarded verbatim — OpenRouter's server
+ * tools (`openrouter:web_search`, `openrouter:web_fetch`, …). The model's
+ * calls to it never reach the client: only citations and usage counts do.
+ */
+export interface ChatServerTool {
+  type: `openrouter:${string}`;
+  parameters?: Record<string, unknown>;
+}
+
+export type ChatTool = ChatFunctionTool | ChatServerTool;
+
+/** Chat-completions citation (OpenRouter nests the fields under `url_citation`). */
+export interface ChatUrlCitationAnnotation {
+  type: "url_citation";
+  url_citation: {
+    url: string;
+    title?: string;
+    start_index?: number;
+    end_index?: number;
+    content?: string;
+  };
+}
+
 export type ChatToolChoice =
   | "auto"
   | "none"
@@ -95,7 +121,7 @@ export type ChatToolChoice =
 export interface ChatCompletionRequest {
   model: string;
   messages: ChatMessage[];
-  tools?: ChatFunctionTool[];
+  tools?: ChatTool[];
   tool_choice?: ChatToolChoice;
   parallel_tool_calls?: boolean;
   temperature?: number;
@@ -166,6 +192,17 @@ export interface CompletionTokensDetails {
   [k: string]: number | undefined;
 }
 
+/**
+ * What the provider's own tools did during the request (OpenRouter server
+ * tools). Their charge is already part of `cost`.
+ */
+export interface ServerToolUseDetails {
+  web_search_requests?: number;
+  tool_calls_requested?: number;
+  tool_calls_executed?: number;
+  [k: string]: number | undefined;
+}
+
 export interface ChatCompletionUsage {
   prompt_tokens: number;
   completion_tokens: number;
@@ -174,6 +211,7 @@ export interface ChatCompletionUsage {
   completion_tokens_details?: CompletionTokensDetails;
   cost?: number;
   cost_details?: UsageCostDetails;
+  server_tool_use_details?: ServerToolUseDetails;
 }
 
 export interface ChatCompletionResponse {
@@ -218,6 +256,8 @@ export interface ChatCompletionChunkChoice {
     reasoning_content?: string | null;
     reasoning?: string | null;
     reasoning_details?: ReasoningDetail[] | null;
+    /** Citations stream in their own chunks, one or more per delta. */
+    annotations?: ChatUrlCitationAnnotation[] | null;
   };
   finish_reason: ChatCompletionChoice["finish_reason"];
   logprobs?: unknown;

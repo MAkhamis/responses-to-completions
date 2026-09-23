@@ -728,9 +728,53 @@ Supports the full OpenAI shape:
 ### Not yet supported
 
 - OpenAI **connectors** (`connector_id`) — only raw `server_url` MCP servers.
-- Built-in tools `web_search`, `file_search`, `code_interpreter`,
-  `computer_use`, `image_generation`. Requests including them will fail at
-  the backend since we forward them as-is.
+- Built-in tools `file_search`, `code_interpreter`, `computer_use`,
+  `image_generation`. Requests including them will fail at the backend since
+  we forward them as-is. Web search is supported — see below.
+
+## Web search and fetch
+
+Two built-in tool shapes are accepted, and where each runs depends on the
+backend:
+
+| Tool | `endpoint: "responses"` (OpenAI, OpenRouter) | `openRouter` on chat completions | other chat-completions backends |
+| --- | --- | --- | --- |
+| `{ type: "web_search", … }` (OpenAI's hosted tool) | forwarded as-is | mapped onto `openrouter:web_search` | refused with an error |
+| `{ type: "openrouter:web_search" \| "openrouter:web_fetch", parameters }` | forwarded as-is (OpenRouter) | forwarded as-is | refused with an error |
+
+The provider runs the tool itself, for any tool-calling model on OpenRouter.
+Nothing reaches the agent loop; what comes back is:
+
+- `url_citation` annotations on the `output_text` part (`url`, `title`,
+  offsets — OpenRouter reports 0 — and an excerpt in `content` when the
+  provider sends one). Streaming emits one
+  `response.output_text.annotation.added` event per citation.
+- `usage.server_tool_use_details` (`web_search_requests`, …). On OpenRouter
+  the search fee is already part of `usage.cost`.
+- On native Responses endpoints, the provider's own call items:
+  `web_search_call` (OpenAI; `action.type` is `search`, `open_page` or
+  `find_in_page` — only `search` actions are billed as tool calls) and
+  `openrouter:web_search` / `openrouter:web_fetch` (OpenRouter).
+
+```ts
+// Same request on either backend — OpenRouter chat completions runs it as
+// openrouter:web_search, OpenAI's Responses endpoint as its hosted search.
+const resp = await client.responses.create({
+  model: "openai/gpt-6-luna",
+  input: "What is Jordan's standard sales tax rate?",
+  tools: [{ type: "web_search", search_context_size: "low" }],
+});
+const text = resp.output.find((i) => i.type === "message");
+// text.content[0].annotations → [{ type: "url_citation", url, title, … }]
+```
+
+`web_search` options map onto OpenRouter's parameters:
+`search_context_size` → `search_context_size`,
+`filters.allowed_domains` → `allowed_domains`, `user_location` →
+`user_location`. For OpenRouter-only options (engine, `max_results`,
+`max_uses`, …) use `openrouter:web_search` directly. OpenAI's
+`/chat/completions` has no general web search tool, so a hosted `web_search`
+on `source: "openAI"` needs `endpoint: "responses"`.
 
 ## Configuration reference
 

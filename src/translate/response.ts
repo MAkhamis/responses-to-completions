@@ -8,8 +8,10 @@ import type {
   OutputItem,
   OutputMessageItem,
   ReasoningItem,
+  UrlCitationAnnotation,
   Usage,
 } from "../types/responses.js";
+import type { ChatUrlCitationAnnotation } from "../types/completions.js";
 import { genFcId, genMessageId, genReasoningId } from "../util/ids.js";
 
 /**
@@ -78,7 +80,12 @@ export function completionToOutputItems(
     };
     if (refusal) message.content.push({ type: "refusal", refusal });
     if (contentText) {
-      message.content.push({ type: "output_text", text: contentText });
+      const annotations = translateAnnotations(msg.annotations);
+      message.content.push({
+        type: "output_text",
+        text: contentText,
+        ...(annotations.length ? { annotations } : {}),
+      });
       outputText = contentText;
     }
     items.push(message);
@@ -100,6 +107,34 @@ export function completionToOutputItems(
   }
 
   return { items, outputText, finishReason: choice.finish_reason ?? null };
+}
+
+/**
+ * Chat-completions citations (`{ type, url_citation: {...} }`, OpenRouter's
+ * web search) → Responses `url_citation` annotations. Offsets default to 0:
+ * OpenRouter does not locate its citations in the text.
+ */
+export function translateAnnotations(
+  annotations: ChatUrlCitationAnnotation[] | null | undefined,
+): UrlCitationAnnotation[] {
+  const out: UrlCitationAnnotation[] = [];
+  for (const a of annotations ?? []) {
+    const c =
+      a?.type === "url_citation"
+        ? (a.url_citation ??
+          (a as unknown as ChatUrlCitationAnnotation["url_citation"]))
+        : undefined;
+    if (!c?.url) continue;
+    out.push({
+      type: "url_citation",
+      url: c.url,
+      ...(c.title ? { title: c.title } : {}),
+      start_index: typeof c.start_index === "number" ? c.start_index : 0,
+      end_index: typeof c.end_index === "number" ? c.end_index : 0,
+      ...(c.content ? { content: c.content } : {}),
+    });
+  }
+  return out;
 }
 
 function messageContentToText(c: unknown): string {
@@ -132,6 +167,9 @@ export function translateUsage(u?: ChatCompletionUsage): Usage | null {
     total_tokens: u.total_tokens,
     ...(typeof u.cost === "number" ? { cost: u.cost } : {}),
     ...(u.cost_details ? { cost_details: u.cost_details } : {}),
+    ...(u.server_tool_use_details
+      ? { server_tool_use_details: numericDetails(u.server_tool_use_details) }
+      : {}),
     ...(u.prompt_tokens_details
       ? {
           input_tokens_details: {

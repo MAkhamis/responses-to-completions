@@ -4,6 +4,7 @@ import type {
   ChatCompletionRequest,
   ChatFunctionTool,
   ChatMessage,
+  ChatTool,
   ChatToolCall,
   ReasoningDetail,
   UsageCostDetails,
@@ -34,6 +35,7 @@ import {
 import {
   itemsToMessages,
   translateResponseFormat,
+  translateServerTools,
   translateToolChoice,
 } from "./translate/request.js";
 import {
@@ -114,6 +116,9 @@ export class AgentLoop {
       ctx.request,
       this.deps.maxIterations,
     );
+    // Provider-run tools (web search) — validated before any MCP connection
+    // opens, so a refused tool leaves nothing to close.
+    const serverTools = translateServerTools(ctx.request.tools, backend.name);
     const mcpSetup = await this.setupMcp(ctx.request.tools);
     const clientFunctionTools = collectClientFunctionTools(ctx.request.tools);
     const producedItems: OutputItem[] = [...mcpSetup.listItems];
@@ -127,7 +132,11 @@ export class AgentLoop {
         ctx.request.instructions,
         ctx.request.model,
       );
-      let chatTools = [...clientFunctionTools, ...mcpSetup.chatTools];
+      let chatTools: ChatTool[] = [
+        ...clientFunctionTools,
+        ...mcpSetup.chatTools,
+        ...serverTools,
+      ];
 
       for (let iter = 0; iter < maxIter; iter++) {
         const req: ChatCompletionRequest = buildChatRequest(
@@ -247,6 +256,9 @@ export class AgentLoop {
       ctx.request,
       this.deps.maxIterations,
     );
+    // Provider-run tools (web search) — validated before any MCP connection
+    // opens, so a refused tool leaves nothing to close.
+    const serverTools = translateServerTools(ctx.request.tools, backend.name);
     const mcpSetup = await this.setupMcp(ctx.request.tools);
     const clientFunctionTools = collectClientFunctionTools(ctx.request.tools);
     const producedItems: OutputItem[] = [];
@@ -278,7 +290,11 @@ export class AgentLoop {
         ctx.request.instructions,
         ctx.request.model,
       );
-      let chatTools = [...clientFunctionTools, ...mcpSetup.chatTools];
+      let chatTools: ChatTool[] = [
+        ...clientFunctionTools,
+        ...mcpSetup.chatTools,
+        ...serverTools,
+      ];
 
       for (let iter = 0; iter < maxIter; iter++) {
         const req: ChatCompletionRequest = buildChatRequest(
@@ -780,7 +796,7 @@ function collectClientFunctionTools(
 function buildChatRequest(
   r: CreateResponseRequest,
   messages: ChatMessage[],
-  tools: ChatFunctionTool[],
+  tools: ChatTool[],
 ): ChatCompletionRequest {
   return {
     model: r.model,
@@ -888,6 +904,14 @@ export function mergeUsage(a: Usage | null, b: Usage | null): Usage | null {
           output_tokens_details: mergeTokenDetails(
             a.output_tokens_details,
             b.output_tokens_details,
+          )!,
+        }
+      : {}),
+    ...(a.server_tool_use_details || b.server_tool_use_details
+      ? {
+          server_tool_use_details: mergeTokenDetails(
+            a.server_tool_use_details,
+            b.server_tool_use_details,
           )!,
         }
       : {}),
