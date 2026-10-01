@@ -55,6 +55,7 @@ export {
   S3Store,
   OpenAIConversationStore,
   OpenAIStoreError,
+  OpenAIStoreTimeoutError,
   createStoreForClient,
   type Store,
   type ConversationItem,

@@ -12,6 +12,7 @@ import type {
   ResponseObject,
 } from "../types/responses.js";
 import type { StreamEvent } from "../translate/stream.js";
+import { describeErrorBody } from "../util/http.js";
 import type { BackendAdapter } from "./adapter.js";
 import { parseSSE } from "./sse.js";
 
@@ -231,7 +232,9 @@ export class BackendError extends Error {
     public status: number,
     public body: string,
   ) {
-    super(`Backend error ${status}: ${body.slice(0, 500)}`);
+    // A gateway's HTML error page is reduced to its title; the raw text
+    // stays on `body`.
+    super(`Backend error ${status}: ${describeErrorBody(body, 500)}`);
     this.name = "BackendError";
   }
 }
