@@ -4,6 +4,10 @@ import type {
   ChatCompletionResponse,
 } from "../types/completions.js";
 import type {
+  TranscriptionRequest,
+  TranscriptionResponse,
+} from "../types/audio.js";
+import type {
   EmbeddingsRequest,
   EmbeddingsResponse,
 } from "../types/embeddings.js";
@@ -61,4 +65,13 @@ export interface BackendAdapter {
     req: EmbeddingsRequest,
     signal?: AbortSignal,
   ): Promise<EmbeddingsResponse>;
+
+  /**
+   * Speech-to-text on the provider's `/audio/transcriptions` endpoint.
+   * Independent of `mode` — a transcription is never a chat turn.
+   */
+  transcribe?(
+    req: TranscriptionRequest,
+    signal?: AbortSignal,
+  ): Promise<TranscriptionResponse>;
 }

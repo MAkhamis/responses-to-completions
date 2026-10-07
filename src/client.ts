@@ -24,6 +24,10 @@ import {
 import type { ConversationItem, Store } from "./store/store.js";
 import type { StreamEvent } from "./translate/stream.js";
 import type {
+  TranscriptionRequest,
+  TranscriptionResponse,
+} from "./types/audio.js";
+import type {
   EmbeddingsRequest,
   EmbeddingsResponse,
 } from "./types/embeddings.js";
@@ -77,8 +81,9 @@ interface StoreToOpenAI {
 
 /**
  * No source: a store-only client. `conversations.*` and `responses.{get,del}`
- * work; `responses.create` and `embeddings.create` throw, having nothing to
- * call. Only meaningful with a store, which the union enforces.
+ * work; `responses.create`, `embeddings.create` and
+ * `audio.transcriptions.create` throw, having nothing to call. Only
+ * meaningful with a store, which the union enforces.
  */
 interface SourceNone {
   source?: never;
@@ -267,6 +272,14 @@ export class ResponsesClient<HasStore extends boolean = boolean> {
     ): Promise<EmbeddingsResponse>;
   };
 
+  readonly audio: {
+    transcriptions: {
+      create(
+        req: TranscriptionRequest & { signal?: AbortSignal },
+      ): Promise<TranscriptionResponse>;
+    };
+  };
+
   readonly conversations: {
     create(input?: {
       id?: string;
@@ -437,6 +450,21 @@ export class ResponsesClient<HasStore extends boolean = boolean> {
           );
         }
         return backend.embeddings(body, signal);
+      },
+    };
+
+    this.audio = {
+      transcriptions: {
+        create: async (req) => {
+          const { signal, ...body } = req;
+          const backend = requireBackend("audio.transcriptions.create");
+          if (!backend.transcribe) {
+            throw new Error(
+              `ResponsesClient: backend "${backend.name}" does not support audio transcription.`,
+            );
+          }
+          return backend.transcribe(body, signal);
+        },
       },
     };
 

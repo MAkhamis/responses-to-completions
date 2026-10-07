@@ -4,6 +4,10 @@ import type {
   ChatCompletionResponse,
 } from "../types/completions.js";
 import type {
+  TranscriptionRequest,
+  TranscriptionResponse,
+} from "../types/audio.js";
+import type {
   EmbeddingsRequest,
   EmbeddingsResponse,
 } from "../types/embeddings.js";
@@ -15,6 +19,11 @@ import type { StreamEvent } from "../translate/stream.js";
 import { describeErrorBody } from "../util/http.js";
 import type { BackendAdapter } from "./adapter.js";
 import { parseSSE } from "./sse.js";
+import {
+  audioBlob,
+  describeAudio,
+  normalizeTranscription,
+} from "./transcription.js";
 
 export interface OpenAICompatAdapterOptions {
   /** Base URL without trailing endpoint, e.g. "https://api.openai.com/v1". */
@@ -68,6 +77,20 @@ export class OpenAICompatAdapter implements BackendAdapter {
       ...(this.opts.headers ?? {}),
       ...(extra ?? {}),
     };
+    if (this.opts.apiKey) h["authorization"] = `Bearer ${this.opts.apiKey}`;
+    return h;
+  }
+
+  /**
+   * Headers for a multipart body: no content-type, so `fetch` sets the
+   * multipart boundary itself — a configured JSON content-type would hide it
+   * and the server could not parse the upload.
+   */
+  private multipartHeaders() {
+    const h: Record<string, string> = {};
+    for (const [key, value] of Object.entries(this.opts.headers ?? {})) {
+      if (key.toLowerCase() !== "content-type") h[key] = value;
+    }
     if (this.opts.apiKey) h["authorization"] = `Bearer ${this.opts.apiKey}`;
     return h;
   }
@@ -184,6 +207,55 @@ export class OpenAICompatAdapter implements BackendAdapter {
       throw new BackendError(res.status, body);
     }
     return (await res.json()) as EmbeddingsResponse;
+  }
+
+  /**
+   * `POST {baseUrl}/audio/transcriptions` as multipart form data — the shape
+   * OpenAI and the OpenAI-compatible servers (Groq, vLLM, LocalAI, …) take.
+   * `languages` goes out as `languages[]` (OpenAI's `gpt-transcribe`) and
+   * replaces `language`, which the API rejects alongside it. `forceModel` is
+   * not applied: it names a chat model.
+   */
+  async transcribe(
+    req: TranscriptionRequest,
+    signal?: AbortSignal,
+  ): Promise<TranscriptionResponse> {
+    const audio = describeAudio(req);
+    const form = new FormData();
+    form.append("file", await audioBlob(req, audio.mime), audio.filename);
+    form.append("model", req.model);
+    if (req.languages?.length) {
+      for (const language of req.languages) {
+        form.append("languages[]", language);
+      }
+    } else if (req.language) {
+      form.append("language", req.language);
+    }
+    if (req.prompt) form.append("prompt", req.prompt);
+    for (const keyword of req.keywords ?? []) {
+      form.append("keywords[]", keyword);
+    }
+    if (req.temperature !== undefined) {
+      form.append("temperature", String(req.temperature));
+    }
+    if (req.response_format) {
+      form.append("response_format", req.response_format);
+    }
+    const res = await this.fetch(`${this.baseUrl}/audio/transcriptions`, {
+      method: "POST",
+      headers: this.multipartHeaders(),
+      body: form,
+      signal,
+    });
+    if (!res.ok) {
+      const body = await res.text();
+      throw new BackendError(res.status, body);
+    }
+    return normalizeTranscription(
+      await res.json(),
+      req.model,
+      res.headers.get("x-request-id"),
+    );
   }
 }
 
