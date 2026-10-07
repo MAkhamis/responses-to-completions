@@ -442,6 +442,56 @@ interface EmbeddingsRequest {
 
 Non-2xx responses throw `BackendError` (same as `complete()`/`respond()`).
 
+## Audio transcription
+
+`client.audio.transcriptions.create(...)` turns a recording into text on the
+provider's `/audio/transcriptions` endpoint and returns one normalized shape
+whatever the source. It needs no store and is never a chat turn.
+
+```ts
+import { readFile } from "node:fs/promises";
+import { ResponsesClient } from "responses-to-completions";
+
+const client = new ResponsesClient({
+  source: "openAI",
+  config: { apiKey: process.env.OPENAI_API_KEY },
+});
+
+const result = await client.audio.transcriptions.create({
+  model: "gpt-transcribe",
+  file: await readFile("note.webm"), // Blob, ArrayBuffer or Uint8Array
+  filename: "note.webm",             // the extension tells the provider the format
+  languages: ["ar", "en"],           // code-switched speech
+  keywords: ["Pepsi", "SKU-42"],     // literal terms to listen for
+});
+// { text, model, languages?: ["ar", "en"], usage: { seconds: 12.4 }, request_id }
+```
+
+The format comes from the file name's extension, then `mime_type` (or the
+Blob's type); a name without an extension gets one from the MIME type. webm,
+m4a/mp4, aac, mp3, wav, ogg/opus and flac are recognized.
+
+| | `openAI` (and OpenAI-compatible servers) | `openRouter` |
+| --- | --- | --- |
+| Wire format | multipart form data | JSON, audio inlined as base64 |
+| `languages` | sent as `languages[]` (replaces `language`) | one entry → `language`; several → left out (auto-detect) |
+| `prompt`, `keywords` | sent | not forwarded — use `provider.options` |
+| `provider` | ignored | forwarded (`zdr`, `data_collection`, `options`) |
+| `request_id` | `x-request-id` | `x-generation-id` |
+
+`usage` keeps what the provider reported. Token-billed models fill
+`input_tokens` / `output_tokens` (with `input_tokens_details.audio_tokens` /
+`text_tokens` — OpenAI spells that object `input_token_details`).
+Duration-billed models fill `seconds`. OpenRouter reports `seconds` plus the
+charged `cost` in USD for every model. A model that reports detected
+languages fills `languages` with their codes; `[]` means none could be
+detected reliably.
+
+`forceModel` is not applied to transcriptions — it names a chat model — and
+neither are OpenRouter's chat routing preferences. The Ollama source has no
+transcription endpoint, so the call throws, as `embeddings.create` does on a
+backend without embeddings. Non-2xx responses throw `BackendError`.
+
 ## Stores
 
 Persistence is optional and off by default (`store: false`). Without it the
@@ -641,7 +691,8 @@ const resp = await reader.responses.get("resp_abc");
 ```
 
 `conversations.*` and `responses.{get,del}` work as usual.
-`responses.create` and `embeddings.create` throw, having nothing to call.
+`responses.create`, `embeddings.create` and `audio.transcriptions.create`
+throw, having nothing to call.
 Useful for an admin tool, a transcript viewer, a retention job, or a test that
 exercises persistence without a model server.
 

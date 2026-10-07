@@ -224,6 +224,54 @@ describe("client construction", () => {
     expect(calls[0].body).not.toHaveProperty("signal");
   });
 
+  it("routes transcriptions to the same backend, stripping the signal", async () => {
+    const calls: any[] = [];
+    const client = new ResponsesClient({
+      source: "openAI",
+      config: {
+        apiKey: "sk-t",
+        fetch: (async (url: any, init: any) => {
+          calls.push({ url: String(url), body: init?.body });
+          return new Response(
+            JSON.stringify({ text: "hi", usage: { type: "duration", seconds: 2 } }),
+            { status: 200 },
+          );
+        }) as typeof fetch,
+      },
+    });
+
+    const result = await client.audio.transcriptions.create({
+      model: "gpt-transcribe",
+      file: new Uint8Array([1, 2]),
+      filename: "a.webm",
+      signal: new AbortController().signal,
+    });
+
+    expect(calls[0].url).toBe("https://api.openai.com/v1/audio/transcriptions");
+    expect(calls[0].body).toBeInstanceOf(FormData);
+    expect((calls[0].body as FormData).get("signal")).toBeNull();
+    expect(result).toEqual({
+      text: "hi",
+      model: "gpt-transcribe",
+      usage: { seconds: 2 },
+    });
+  });
+
+  it("says so when the backend cannot transcribe", async () => {
+    const client = new ResponsesClient({
+      source: "ollama",
+      config: { api: "native", host: "http://o" },
+    });
+
+    await expect(
+      client.audio.transcriptions.create({
+        model: "whisper",
+        file: new Uint8Array([1]),
+        filename: "a.wav",
+      }),
+    ).rejects.toThrow(/does not support audio transcription/);
+  });
+
   it("says so when the backend has no embeddings support", async () => {
     class NoEmbeddings extends ResponsesClient {
       protected override createBackend(): BackendAdapter {
@@ -543,6 +591,13 @@ describe("client construction", () => {
     await expect(
       client.embeddings.create({ model: "m", input: "hi" }),
     ).rejects.toThrow(/`embeddings.create` requires a source/);
+    await expect(
+      client.audio.transcriptions.create({
+        model: "m",
+        file: new Uint8Array([1]),
+        filename: "a.wav",
+      }),
+    ).rejects.toThrow(/`audio.transcriptions.create` requires a source/);
 
     await rm(dir, { recursive: true, force: true });
   });

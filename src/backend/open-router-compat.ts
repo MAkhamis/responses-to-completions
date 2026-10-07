@@ -4,6 +4,10 @@ import type {
   ChatCompletionResponse,
 } from "../types/completions.js";
 import type {
+  TranscriptionRequest,
+  TranscriptionResponse,
+} from "../types/audio.js";
+import type {
   EmbeddingsRequest,
   EmbeddingsResponse,
 } from "../types/embeddings.js";
@@ -15,6 +19,11 @@ import type { StreamEvent } from "../translate/stream.js";
 import type { BackendAdapter } from "./adapter.js";
 import { BackendError } from "./openai-compat.js";
 import { parseSSE } from "./sse.js";
+import {
+  audioBase64,
+  describeAudio,
+  normalizeTranscription,
+} from "./transcription.js";
 
 const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
 
@@ -218,6 +227,55 @@ export class OpenRouterAdapter implements BackendAdapter {
       throw new BackendError(res.status, body);
     }
     return (await res.json()) as EmbeddingsResponse;
+  }
+
+  /**
+   * `POST {baseUrl}/audio/transcriptions` with the audio inlined as base64
+   * JSON, OpenRouter's native form — the one that also carries `provider`
+   * (zero-data-retention routing, provider-specific options). The endpoint
+   * takes a single `language`: one entry of `languages` is sent as that,
+   * several are left out so the provider detects the language itself.
+   * `prompt` and `keywords` are not forwarded (OpenRouter ignores the one and
+   * rejects unsupported keyword fields per model); `forceModel` and the
+   * adapter's chat routing preferences are not applied either.
+   */
+  async transcribe(
+    req: TranscriptionRequest,
+    signal?: AbortSignal,
+  ): Promise<TranscriptionResponse> {
+    const audio = describeAudio(req);
+    const language =
+      req.languages?.length === 1
+        ? req.languages[0]
+        : req.languages?.length
+        ? undefined
+        : req.language;
+    const res = await this.fetch(`${this.baseUrl}/audio/transcriptions`, {
+      method: "POST",
+      headers: this.headers(),
+      body: JSON.stringify({
+        model: req.model,
+        input_audio: { data: await audioBase64(req), format: audio.format },
+        ...(language ? { language } : {}),
+        ...(req.temperature !== undefined
+          ? { temperature: req.temperature }
+          : {}),
+        ...(req.response_format
+          ? { response_format: req.response_format }
+          : {}),
+        ...(req.provider ? { provider: req.provider } : {}),
+      }),
+      signal,
+    });
+    if (!res.ok) {
+      const body = await res.text();
+      throw new BackendError(res.status, body);
+    }
+    return normalizeTranscription(
+      await res.json(),
+      req.model,
+      res.headers.get("x-generation-id"),
+    );
   }
 }
 
