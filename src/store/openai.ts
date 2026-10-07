@@ -1,4 +1,13 @@
 import type { ConversationObject, ResponseObject } from "../types/responses.js";
+import {
+  attemptSignal,
+  describeErrorBody,
+  discardBody,
+  isRetryableFetchError,
+  isRetryableResponse,
+  retryDelayMs,
+  sleep,
+} from "../util/http.js";
 import type { ConversationItem, Store } from "./store.js";
 
 export interface OpenAIConversationStoreOptions {
@@ -13,10 +22,41 @@ export interface OpenAIConversationStoreOptions {
    * Clamped to OpenAI's accepted 1-100 range.
    */
   pageSize?: number;
+  /**
+   * How many times a request that failed transiently is sent again. Default
+   * 2, so up to three attempts; `0` disables retries.
+   *
+   * Transient means a dropped connection, a timeout (see `timeoutMs`),
+   * 408/409/429 or any 5xx — including the HTML error pages Cloudflare serves
+   * in front of api.openai.com. Every read, delete, metadata update and
+   * conversation creation is retried on those; a retried creation can at
+   * worst leave an unused conversation behind. Item appends are retried only
+   * when the failure proves the items did not land — a 429, a connection
+   * that never opened, or the server's own `x-should-retry: true` — because
+   * a 5xx from a gateway does not say whether the write went through, and a
+   * duplicated append corrupts the transcript.
+   *
+   * The wait before each retry follows the server's `retry-after` hint when
+   * it gives one, otherwise 0.5 s doubling to 8 s. Aborting the request's
+   * signal stops the retries at once.
+   */
+  maxRetries?: number;
+  /**
+   * How long, in ms, a request that is safe to retry may wait for OpenAI to
+   * start answering before the attempt is abandoned and retried. Default
+   * 60000; `0` disables it. Only the wait for the response headers counts, so
+   * a large page that is already downloading is never cut off. Item appends
+   * are exempt: an abandoned append might still land.
+   */
+  timeoutMs?: number;
 }
 
 const MAX_ITEMS_PER_CALL = 20;
 const MAX_LIST_PAGES = 1000;
+const DEFAULT_MAX_RETRIES = 2;
+const DEFAULT_TIMEOUT_MS = 60_000;
+/** The longest delay `setTimeout` honors — a larger one fires at once. */
+const MAX_TIMEOUT_MS = 2_147_483_647;
 
 const ITEM_INCLUDES = ["message.input_image.image_url"] as const;
 
@@ -25,15 +65,109 @@ function withIncludes(qs: URLSearchParams): URLSearchParams {
   return qs;
 }
 
+/**
+ * The retry settings a store will run with, defaults applied. Throws on a
+ * value it cannot honor, so a bad config fails when the client is built
+ * rather than on its first request.
+ */
+export function resolveOpenAIStoreRetries(opts: {
+  maxRetries?: number;
+  timeoutMs?: number;
+}): { maxRetries: number; timeoutMs: number } {
+  const maxRetries = opts.maxRetries ?? DEFAULT_MAX_RETRIES;
+  if (!Number.isInteger(maxRetries) || maxRetries < 0) {
+    throw new Error(
+      `OpenAIConversationStore: \`maxRetries\` must be a non-negative integer, got ${String(opts.maxRetries)}`,
+    );
+  }
+  const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  if (
+    !Number.isFinite(timeoutMs) ||
+    timeoutMs < 0 ||
+    timeoutMs > MAX_TIMEOUT_MS
+  ) {
+    throw new Error(
+      `OpenAIConversationStore: \`timeoutMs\` must be between 0 and ${MAX_TIMEOUT_MS} ms, got ${String(opts.timeoutMs)}`,
+    );
+  }
+  return { maxRetries, timeoutMs };
+}
+
+/** Which request failed, for the error message. */
+interface RequestContext {
+  method?: string;
+  /** Path without the query string. */
+  path?: string;
+  /** Attempts made, counting the first. */
+  attempts?: number;
+}
+
+function describeRequest(ctx: RequestContext): string {
+  const parts: string[] = [];
+  const target = [ctx.method, ctx.path].filter(Boolean).join(" ");
+  if (target) parts.push(target);
+  if (ctx.attempts && ctx.attempts > 1) parts.push(`${ctx.attempts} attempts`);
+  return parts.length ? ` [${parts.join(", ")}]` : "";
+}
+
+/**
+ * A non-2xx answer from the Conversations API. `body` holds the raw response
+ * text; the message carries a one-line reading of it — an HTML error page
+ * from a gateway is reduced to its title — plus the request and, when
+ * retries ran out, how many attempts were made.
+ */
 export class OpenAIStoreError extends Error {
+  /** Attempts made before giving up, counting the first. */
+  readonly attempts: number;
+
   constructor(
     public status: number,
     public body: string,
+    context: RequestContext = {},
   ) {
-    super(`OpenAI conversations API error ${status}: ${body}`);
+    super(
+      `OpenAI conversations API error ${status}: ${describeErrorBody(body)}${describeRequest(context)}`,
+    );
     this.name = "OpenAIStoreError";
+    this.attempts = context.attempts ?? 1;
   }
 }
+
+/**
+ * A request OpenAI did not start answering within `timeoutMs`, on every
+ * attempt. There is no status or body to report, so it is not an
+ * `OpenAIStoreError` — nor an `AbortError`, since the caller did not end it.
+ */
+export class OpenAIStoreTimeoutError extends Error {
+  /** Attempts made before giving up, counting the first. */
+  readonly attempts: number;
+
+  constructor(
+    public timeoutMs: number,
+    context: RequestContext = {},
+  ) {
+    super(
+      `OpenAI conversations API did not respond within ${timeoutMs} ms${describeRequest(context)}`,
+    );
+    this.name = "OpenAIStoreTimeoutError";
+    this.attempts = context.attempts ?? 1;
+  }
+}
+
+interface CallOptions {
+  body?: unknown;
+  /** Treat 404 as "absent" and return null rather than throwing. */
+  nullOn404?: boolean;
+  signal?: AbortSignal;
+  /**
+   * Whether the request may be sent again after a failure that might still
+   * have been applied. Defaults to true for GET and DELETE, false for POST.
+   */
+  repeatable?: boolean;
+}
+
+type AttemptOutcome<T> =
+  { done: true; value: T | null } | { done: false; retryInMs: number };
 
 /**
  * Store backed by OpenAI's Conversations API instead of local disk or S3 —
@@ -69,6 +203,8 @@ export class OpenAIConversationStore implements Store {
   private baseUrl: string;
   private fetch: typeof fetch;
   private pageSize: number;
+  private maxRetries: number;
+  private timeoutMs: number;
 
   constructor(private opts: OpenAIConversationStoreOptions) {
     this.baseUrl = (opts.baseUrl ?? "https://api.openai.com/v1").replace(
@@ -77,6 +213,8 @@ export class OpenAIConversationStore implements Store {
     );
     this.fetch = opts.fetch ?? fetch;
     this.pageSize = opts.pageSize ?? 100;
+    ({ maxRetries: this.maxRetries, timeoutMs: this.timeoutMs } =
+      resolveOpenAIStoreRetries(opts));
   }
 
   private headers(): Record<string, string> {
@@ -89,28 +227,80 @@ export class OpenAIConversationStore implements Store {
     };
   }
 
+  /**
+   * One Conversations API request, retried on transient failures (see
+   * `maxRetries`). A single upstream blip — a 504 page from the gateway in
+   * front of api.openai.com — used to fail the whole turn that needed it.
+   */
   private async call<T>(
     method: "GET" | "POST" | "DELETE",
     path: string,
-    body?: unknown,
-    /** Treat 404 as "absent" and return null rather than throwing. */
-    nullOn404 = false,
-    signal?: AbortSignal,
+    opts: CallOptions = {},
   ): Promise<T | null> {
-    const res = await this.fetch(`${this.baseUrl}${path}`, {
-      method,
-      headers: this.headers(),
-      ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
-      signal,
-    });
-    if (!res.ok) {
-      if (nullOn404 && res.status === 404) return null;
-      throw new OpenAIStoreError(res.status, await res.text());
+    for (let attempt = 1; ; attempt++) {
+      const outcome = await this.attempt<T>(method, path, opts, attempt);
+      if (outcome.done) return outcome.value;
+      await sleep(outcome.retryInMs, opts.signal);
     }
-    if (res.status === 204) return {} as T;
-    const text = await res.text();
-    if (!text.trim()) return {} as T;
-    return JSON.parse(text) as T;
+  }
+
+  private async attempt<T>(
+    method: "GET" | "POST" | "DELETE",
+    path: string,
+    opts: CallOptions,
+    attempt: number,
+  ): Promise<AttemptOutcome<T>> {
+    const { body, nullOn404 = false, signal } = opts;
+    const repeatable = opts.repeatable ?? method !== "POST";
+    const canRetry = attempt <= this.maxRetries;
+    const context: RequestContext = {
+      method,
+      path: path.split("?")[0],
+      attempts: attempt,
+    };
+    // Only a request that may be sent again is abandoned on a timeout —
+    // giving up on an append would leave unknown whether it landed.
+    const scope =
+      repeatable && this.timeoutMs > 0
+        ? attemptSignal(signal, this.timeoutMs)
+        : undefined;
+    try {
+      let res: Response;
+      try {
+        res = await this.fetch(`${this.baseUrl}${path}`, {
+          method,
+          headers: this.headers(),
+          ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+          signal: scope?.signal ?? signal,
+        });
+      } catch (err) {
+        const timedOut = scope?.timedOut() === true && !signal?.aborted;
+        if (
+          canRetry &&
+          (timedOut || isRetryableFetchError(err, signal, repeatable))
+        ) {
+          return { done: false, retryInMs: retryDelayMs(attempt - 1) };
+        }
+        if (timedOut)
+          throw new OpenAIStoreTimeoutError(this.timeoutMs, context);
+        throw err;
+      }
+      scope?.settle();
+      if (!res.ok) {
+        if (nullOn404 && res.status === 404) return { done: true, value: null };
+        if (canRetry && isRetryableResponse(res, repeatable)) {
+          await discardBody(res);
+          return { done: false, retryInMs: retryDelayMs(attempt - 1, res) };
+        }
+        throw new OpenAIStoreError(res.status, await res.text(), context);
+      }
+      if (res.status === 204) return { done: true, value: {} as T };
+      const text = await res.text();
+      if (!text.trim()) return { done: true, value: {} as T };
+      return { done: true, value: JSON.parse(text) as T };
+    } finally {
+      scope?.release();
+    }
   }
 
   // ---- conversations ----
@@ -135,11 +325,15 @@ export class OpenAIConversationStore implements Store {
       "POST",
       "/conversations",
       {
-        ...(input.metadata ? { metadata: input.metadata } : {}),
-        ...(first.length ? { items: first.map(stripServerFields) } : {}),
+        body: {
+          ...(input.metadata ? { metadata: input.metadata } : {}),
+          ...(first.length ? { items: first.map(stripServerFields) } : {}),
+        },
+        signal,
+        // A retry after an ambiguous failure can at worst leave an unused
+        // conversation behind; the id returned is always the one to use.
+        repeatable: true,
       },
-      false,
-      signal,
     );
     if (!created?.id) {
       throw new Error(
@@ -164,9 +358,7 @@ export class OpenAIConversationStore implements Store {
     return this.call<ConversationObject>(
       "GET",
       `/conversations/${encodeURIComponent(id)}`,
-      undefined,
-      true,
-      signal,
+      { nullOn404: true, signal },
     );
   }
 
@@ -178,8 +370,7 @@ export class OpenAIConversationStore implements Store {
     return this.call<ConversationObject>(
       "POST",
       `/conversations/${encodeURIComponent(id)}`,
-      { metadata: patch.metadata },
-      true,
+      { body: { metadata: patch.metadata }, nullOn404: true, repeatable: true },
     );
   }
 
@@ -189,8 +380,7 @@ export class OpenAIConversationStore implements Store {
     const res = await this.call<{ id: string; deleted?: boolean }>(
       "DELETE",
       `/conversations/${encodeURIComponent(id)}`,
-      undefined,
-      true,
+      { nullOn404: true },
     );
     return { id, deleted: res ? (res.deleted ?? true) : false };
   }
@@ -206,10 +396,16 @@ export class OpenAIConversationStore implements Store {
         "POST",
         `/conversations/${encodeURIComponent(conversationId)}/items`,
         {
-          items: items.slice(i, i + MAX_ITEMS_PER_CALL).map(stripServerFields),
+          body: {
+            items: items
+              .slice(i, i + MAX_ITEMS_PER_CALL)
+              .map(stripServerFields),
+          },
+          signal,
+          // Items carry no idempotency key: re-sending a batch that had in
+          // fact landed would duplicate it in the transcript.
+          repeatable: false,
         },
-        false,
-        signal,
       );
     }
   }
@@ -296,7 +492,7 @@ export class OpenAIConversationStore implements Store {
       data?: ConversationItem[];
       has_more?: boolean;
       last_id?: string | null;
-    }>("GET", `${base}?${qs.toString()}`, undefined, true, signal);
+    }>("GET", `${base}?${qs.toString()}`, { nullOn404: true, signal });
     const items = res?.data ?? [];
     return {
       items,
@@ -315,8 +511,7 @@ export class OpenAIConversationStore implements Store {
     return this.call<ConversationItem>(
       "GET",
       `/conversations/${encodeURIComponent(conversationId)}/items/${encodeURIComponent(itemId)}?${qs.toString()}`,
-      undefined,
-      true,
+      { nullOn404: true },
     );
   }
 
@@ -327,8 +522,7 @@ export class OpenAIConversationStore implements Store {
     const res = await this.call<unknown>(
       "DELETE",
       `/conversations/${encodeURIComponent(conversationId)}/items/${encodeURIComponent(itemId)}`,
-      undefined,
-      true,
+      { nullOn404: true },
     );
     return { id: itemId, deleted: res !== null };
   }
@@ -344,9 +538,7 @@ export class OpenAIConversationStore implements Store {
     return this.call<ResponseObject>(
       "GET",
       `/responses/${encodeURIComponent(id)}`,
-      undefined,
-      true,
-      signal,
+      { nullOn404: true, signal },
     );
   }
 
@@ -354,8 +546,7 @@ export class OpenAIConversationStore implements Store {
     const res = await this.call<{ deleted?: boolean }>(
       "DELETE",
       `/responses/${encodeURIComponent(id)}`,
-      undefined,
-      true,
+      { nullOn404: true },
     );
     return { id, deleted: res ? (res.deleted ?? true) : false };
   }

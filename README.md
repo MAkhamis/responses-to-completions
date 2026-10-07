@@ -319,8 +319,8 @@ The types follow the values:
 - **`store_config` is typed by `store_client`.** S3 requires a `bucket` (plus
   optional `prefix`, `client`, `clientConfig`); `"local"` requires a `dir`;
   the OpenAI store takes an optional
-  `apiKey`/`baseUrl`/`headers`/`fetch`/`pageSize` and otherwise reuses the
-  credentials already in `config` — except `baseUrl`, which is never
+  `apiKey`/`baseUrl`/`headers`/`fetch`/`pageSize`/`maxRetries`/`timeoutMs`
+  and otherwise reuses the credentials already in `config` — except `baseUrl`, which is never
   inherited: conversations always go to api.openai.com unless
   `store_config.baseUrl` overrides it.
 
@@ -563,6 +563,51 @@ belonged to, so chaining it by `previous_response_id` replays that turn's
 output rather than the whole conversation. Pass `conversation` when the full
 transcript matters. The `"local"` and `"S3"` stores persist responses
 themselves and have neither restriction.
+
+#### Transient failures
+
+A request that fails transiently — a dropped connection, a stalled upstream,
+408/409/429 or any 5xx, including the HTML error pages Cloudflare serves in
+front of api.openai.com — is sent again, up to `maxRetries` times (default
+2). The wait follows the server's `retry-after` hint when it gives one,
+otherwise 0.5 s doubling to 8 s, and aborting the request's signal ends it at
+once. An attempt that has not started answering within `timeoutMs` (default
+60 s) is abandoned and retried; only the wait for the response headers
+counts.
+
+What is retried depends on whether sending it twice is safe:
+
+- Reads, deletes, metadata updates and `conversations.create` retry on every
+  transient failure. A retried create can at worst leave an unused
+  conversation behind.
+- Item appends — including the one that persists each turn — retry only when
+  the failure proves the items did not land: a 429, a connection that never
+  opened, or the server's own `x-should-retry: true`. A 5xx from a gateway
+  does not say whether the write went through, and a duplicated append
+  corrupts the transcript. Appends are exempt from `timeoutMs` for the same
+  reason.
+
+```ts
+new ResponsesClient({
+  source: "openAI",
+  config: { apiKey: process.env.OPENAI_API_KEY },
+  store: true,
+  store_client: "openAI",
+  store_config: { maxRetries: 4, timeoutMs: 30_000 }, // maxRetries: 0 disables
+});
+```
+
+A failure that outlasts the retries throws `OpenAIStoreError` with a
+one-line message — an HTML error page is reduced to its title and Cloudflare
+Ray ID — naming the request and the attempts made:
+
+```
+OpenAI conversations API error 504: api.openai.com | 504: Gateway time-out (HTML error page, Cloudflare Ray ID a43247a5be46f282) [GET /conversations/conv_1/items, 3 attempts]
+```
+
+The raw response text stays on `err.body`. A request OpenAI never started
+answering throws `OpenAIStoreTimeoutError` instead — deliberately not an
+`AbortError`, since nothing the caller did ended it.
 
 ### `store_client: "local"` — for development and tests
 

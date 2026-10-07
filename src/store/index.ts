@@ -3,6 +3,7 @@ export { S3Store, type S3StoreOptions } from "./s3.js";
 export {
   OpenAIConversationStore,
   OpenAIStoreError,
+  OpenAIStoreTimeoutError,
   type OpenAIConversationStoreOptions,
 } from "./openai.js";
 export {

@@ -1,7 +1,10 @@
 import type { S3Client, S3ClientConfig } from "@aws-sdk/client-s3";
 import type { ConversationObject, ResponseObject } from "../types/responses.js";
 import { LocalFileStore } from "./local-file.js";
-import { OpenAIConversationStore } from "./openai.js";
+import {
+  OpenAIConversationStore,
+  resolveOpenAIStoreRetries,
+} from "./openai.js";
 import type { ConversationItem, Store } from "./store.js";
 
 /** Store backends the SDK knows how to build. */
@@ -34,6 +37,16 @@ export interface OpenAIStoreClientConfig {
   fetch?: typeof fetch;
   /** Page size used when reading a whole conversation. */
   pageSize?: number;
+  /**
+   * Retries for transient failures (default 2). See
+   * `OpenAIConversationStoreOptions.maxRetries` for what is retried.
+   */
+  maxRetries?: number;
+  /**
+   * Per-attempt wait for OpenAI to start answering, in ms (default 60000).
+   * See `OpenAIConversationStoreOptions.timeoutMs`.
+   */
+  timeoutMs?: number;
 }
 
 /** The config shape a given store client accepts. */
@@ -87,6 +100,8 @@ export function createStoreForClient(
       ...(headers ? { headers } : {}),
       ...(fetchImpl ? { fetch: fetchImpl } : {}),
       ...(c.pageSize !== undefined ? { pageSize: c.pageSize } : {}),
+      ...(c.maxRetries !== undefined ? { maxRetries: c.maxRetries } : {}),
+      ...(c.timeoutMs !== undefined ? { timeoutMs: c.timeoutMs } : {}),
     });
   }
 
@@ -128,6 +143,7 @@ export function assertStoreClientConfig(
         'createStoreForClient: store_client "openAI" needs an API key — pass `store_config.apiKey` or an `apiKey` in the provider config.',
       );
     }
+    resolveOpenAIStoreRetries(c);
     return;
   }
   const c = config as S3StoreClientConfig | undefined;
